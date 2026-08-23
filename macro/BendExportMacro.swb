@@ -1,0 +1,910 @@
+' Generic CadLink - bend.json export (Phase 1)
+' Late binding: no VBA References required (.swb can run directly)
+' Run: Tools > Macro > Run > BendExportMacro.swb
+
+Private Const SW_DOC_PART As Long = 1
+Private Const SW_BEND_DIR_UP As Long = 1
+Private Const SW_BEND_DIR_DOWN As Long = 2
+Private Const SW_SKETCH_LINE As Long = 0
+Private Const SW_BEND_LINE_UP As Long = 1
+Private Const SW_BEND_LINE_DOWN As Long = 2
+Private Const SW_SUPPRESS_FEATURE As Long = 0
+Private Const SW_UNSUPPRESS_FEATURE As Long = 1
+Private Const SW_THIS_CONFIGURATION As Long = 2
+
+Dim swApp As Object
+Dim gFlatBendDirs As Object
+Dim gCurrentBendIndex As Long
+Dim gLastDirWarning As String
+Dim gFlatPatternWasSuppressed As Boolean
+
+Sub main()
+    If Not ConnectSwApp() Then Exit Sub
+    ExportBendJson
+End Sub
+
+Private Function ConnectSwApp() As Boolean
+    On Error Resume Next
+    Set swApp = Nothing
+    Set swApp = GetObject(, "SldWorks.Application")
+    If swApp Is Nothing Then
+        Set swApp = Application.SldWorks
+    End If
+    On Error GoTo 0
+    If swApp Is Nothing Then
+        MsgBox "Could not connect to SolidWorks.", vbCritical, "Generic CadLink"
+        ConnectSwApp = False
+    Else
+        ConnectSwApp = True
+    End If
+End Function
+
+Private Sub ExportBendJson()
+    If swApp Is Nothing Then
+        If Not ConnectSwApp() Then Exit Sub
+    End If
+
+    Dim swModel As Object
+    Set swModel = swApp.ActiveDoc
+
+    Dim errors As String
+    Dim warnings As String
+    errors = ""
+    warnings = ""
+
+    If swModel Is Nothing Then
+        errors = errors & "NO_ACTIVE_DOCUMENT: No open document." & vbCrLf
+        ShowResult "", "", 0, "", errors, warnings
+        Exit Sub
+    End If
+
+    If swModel.GetType <> SW_DOC_PART Then
+        errors = errors & "NOT_PART: Open a sheet metal part (.sldprt)." & vbCrLf
+        ShowResult "", "", 0, "", errors, warnings
+        GoTo Cleanup
+    End If
+
+    Dim partPath As String
+    partPath = swModel.GetPathName
+    If Len(Trim(partPath)) = 0 Then
+        errors = errors & "UNSAVED_DOCUMENT: Save the file before running." & vbCrLf
+        ShowResult "", "", 0, "", errors, warnings
+        GoTo Cleanup
+    End If
+
+    Dim swPart As Object
+    Set swPart = swModel
+
+    If Not HasFlatPattern(swModel, errors, warnings) Then
+        ShowResult partPath, "", 0, "", errors, warnings
+        GoTo Cleanup
+    End If
+
+    Dim thickness As Double
+    If Not GetThickness(swModel, swPart, thickness) Then
+        errors = errors & "THICKNESS_UNKNOWN: Could not read sheet thickness." & vbCrLf
+        ShowResult partPath, "", 0, "", errors, warnings
+        GoTo Cleanup
+    End If
+
+    Dim materialName As String
+    materialName = GetMaterialName(swPart, warnings)
+
+    Dim bendsJson As String
+    Dim bendCount As Long
+    bendsJson = CollectBendsJson(swModel, warnings, bendCount)
+
+    If bendCount = 0 And Len(errors) = 0 Then
+        warnings = warnings & "NO_BENDS: No bend features found." & vbCrLf
+    End If
+
+    Dim partNumber As String
+    partNumber = GetPartNumber(partPath)
+
+    Dim json As String
+    json = BuildJson(partPath, partNumber, thickness, materialName, bendsJson, errors, warnings)
+
+    Dim outPath As String
+    outPath = Left(partPath, InStrRev(partPath, "\")) & "bend.json"
+    WriteUtf8 outPath, json
+
+    ShowResult partPath, outPath, bendCount, CStr(thickness), errors, warnings
+
+Cleanup:
+    RestoreRollbackBar swModel
+End Sub
+
+Private Sub RestoreRollbackBar(swModel As Object)
+    ' AccessSelections leaves rollback bar — move it back to end
+    On Error Resume Next
+    If swModel Is Nothing Then Exit Sub
+    swModel.FeatureManager.EditRollback2 Nothing, 2
+    swModel.EditRebuild3
+    swModel.ClearSelection2 True
+End Sub
+
+Private Function HasFlatPattern(swModel As Object, ByRef errors As String, ByRef warnings As String) As Boolean
+    Dim swFeat As Object
+    Set swFeat = FindFeatureByType(swModel, "FlatPattern")
+    If swFeat Is Nothing Then
+        errors = errors & "NO_FLAT_PATTERN: Flat pattern feature not found." & vbCrLf
+        HasFlatPattern = False
+        Exit Function
+    End If
+    If swFeat.IsSuppressed Then
+        warnings = warnings & "FLAT_PATTERN_SUPPRESSED: Flat pattern is suppressed (folded view). Bend export continues." & vbCrLf
+    End If
+    HasFlatPattern = True
+End Function
+
+Private Function GetThickness(swModel As Object, swPart As Object, ByRef thickness As Double) As Boolean
+    Dim swFeat As Object
+    Set swFeat = FindFeatureByType(swModel, "SheetMetal")
+    If Not swFeat Is Nothing Then
+        Dim smData As Object
+        Dim accessed As Boolean
+        accessed = False
+        Set smData = swFeat.GetDefinition
+        On Error Resume Next
+        smData.AccessSelections swModel, Nothing
+        accessed = (Err.Number = 0)
+        Err.Clear
+        On Error GoTo 0
+        thickness = ToMm(smData.Thickness)
+        If accessed Then
+            On Error Resume Next
+            smData.ReleaseSelectionAccess
+        End If
+        If thickness > 0 Then
+            GetThickness = True
+            Exit Function
+        End If
+    End If
+    On Error Resume Next
+    thickness = ToMm(swPart.GetSheetMetalThickness)
+    If thickness > 0 Then
+        GetThickness = True
+    Else
+        GetThickness = False
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function GetMaterialName(swPart As Object, ByRef warnings As String) As String
+    On Error GoTo Fail
+    Dim matName As String
+    Dim dbName As String
+    dbName = ""
+    matName = swPart.GetMaterialPropertyName2("", dbName)
+    If Len(Trim(matName)) > 0 Then
+        GetMaterialName = Trim(matName)
+    Else
+        warnings = warnings & "MATERIAL_UNKNOWN: Material name not found." & vbCrLf
+        GetMaterialName = ""
+    End If
+    Exit Function
+Fail:
+    warnings = warnings & "MATERIAL_UNKNOWN: Material name not found." & vbCrLf
+    GetMaterialName = ""
+End Function
+
+Private Function CollectBendsJson(swModel As Object, ByRef warnings As String, ByRef bendCount As Long) As String
+    Dim result As String
+    result = ""
+    bendCount = 0
+
+    Set gFlatBendDirs = CreateObject("Scripting.Dictionary")
+    gCurrentBendIndex = 0
+    gFlatPatternWasSuppressed = PrepareFlatPatternForRead(swModel)
+    CollectFlatPatternBendDirections swModel
+    RestoreFlatPatternSuppression swModel, gFlatPatternWasSuppressed
+
+    Dim userBends As Object
+    Dim oneBends As Object
+    Set userBends = CreateObject("Scripting.Dictionary")
+    Set oneBends = CreateObject("Scripting.Dictionary")
+
+    Dim swTop As Object
+    Set swTop = swModel.FirstFeature
+    Do While Not swTop Is Nothing
+        CollectBendCandidatesInTree swTop, userBends, oneBends, False
+        Set swTop = swTop.GetNextFeature
+    Loop
+
+    Dim exportBends As Object
+    If oneBends.Count > 0 Then
+        Set exportBends = oneBends
+    Else
+        Set exportBends = userBends
+    End If
+
+    Dim i As Long
+    For i = 0 To exportBends.Count - 1
+        Dim swFeat As Object
+        Set swFeat = exportBends(CStr(i))
+        bendCount = bendCount + 1
+        Dim bendJson As String
+        Dim warnLine As String
+        bendJson = BendToJson(swModel, swFeat, bendCount, warnLine)
+        If Len(bendJson) > 0 Then
+            If Len(result) > 0 Then result = result & "," & vbCrLf
+            result = result & bendJson
+        Else
+            bendCount = bendCount - 1
+        End If
+        If Len(warnLine) > 0 Then warnings = warnings & warnLine & vbCrLf
+    Next i
+
+    CollectBendsJson = result
+End Function
+
+Private Sub CollectBendCandidatesInTree(swFeat As Object, userBends As Object, oneBends As Object, underFlatPattern As Boolean)
+    Dim inFlat As Boolean
+    inFlat = underFlatPattern
+    If swFeat.GetTypeName2 = "FlatPattern" Then inFlat = True
+
+    Dim typeName As String
+    typeName = swFeat.GetTypeName2
+
+    If typeName = "OneBend" And Not inFlat Then
+        oneBends.Add CStr(oneBends.Count), swFeat
+    ElseIf IsUserLevelBendType(typeName) Then
+        userBends.Add CStr(userBends.Count), swFeat
+    End If
+
+    Dim swSub As Object
+    Set swSub = swFeat.GetFirstSubFeature
+    Do While Not swSub Is Nothing
+        CollectBendCandidatesInTree swSub, userBends, oneBends, inFlat
+        Set swSub = swSub.GetNextSubFeature
+    Loop
+End Sub
+
+Private Function IsUserLevelBendType(typeName As String) As Boolean
+    Select Case typeName
+        Case "SM3dBend", "EdgeFlange", "SketchBend", "SweepBend", "MiterFlange"
+            IsUserLevelBendType = True
+        Case Else
+            IsUserLevelBendType = False
+    End Select
+End Function
+
+Private Function IsBendFeatureType(typeName As String) As Boolean
+    Select Case typeName
+        Case "SM3dBend", "EdgeFlange", "SketchBend", "SweepBend", "MiterFlange", "OneBend"
+            IsBendFeatureType = True
+        Case Else
+            IsBendFeatureType = False
+    End Select
+End Function
+
+Private Function BendToJson(swModel As Object, swFeat As Object, bendIndex As Long, ByRef warning As String) As String
+    warning = ""
+    Dim direction As String
+    Dim innerR As Double
+    Dim angleRad As Double
+    Dim errMsg As String
+    Dim featName As String
+    featName = swFeat.Name
+    gCurrentBendIndex = bendIndex
+    gLastDirWarning = ""
+
+    direction = ReadBendDirection(swModel, swFeat, innerR, angleRad, errMsg)
+    If Len(direction) = 0 Then
+        If Len(errMsg) = 0 Then errMsg = "Could not read bend geometry or direction."
+        warning = "BEND_PARSE_FAILED: '" & featName & "' - " & errMsg
+        BendToJson = ""
+        Exit Function
+    End If
+    If Len(gLastDirWarning) > 0 Then
+        warning = gLastDirWarning & ": '" & featName & "'"
+    End If
+
+    Dim angleDeg As Double
+    angleDeg = Round4(angleRad * 180# / 3.14159265358979)
+
+    Dim lengthMm As Variant
+    lengthMm = GetBendLengthMm(swFeat)
+    Dim lengthPart As String
+    If IsEmpty(lengthMm) Then
+        lengthPart = "null"
+        If Len(warning) > 0 Then warning = warning & vbCrLf
+        warning = warning & "BEND_LENGTH_UNKNOWN: '" & featName & "' bend length not available."
+    Else
+        lengthPart = JsonNum(CDbl(lengthMm))
+    End If
+
+    Dim dxfLayer As String
+    If direction = "up" Then
+        dxfLayer = "BEND_UP"
+    Else
+        dxfLayer = "BEND_DOWN"
+    End If
+
+    BendToJson = "    {" & vbCrLf & _
+        "      ""id"": ""B" & bendIndex & """," & vbCrLf & _
+        "      ""dxfLayer"": """ & dxfLayer & """," & vbCrLf & _
+        "      ""direction"": """ & direction & """," & vbCrLf & _
+        "      ""innerRadius"": " & JsonNum(Round4(innerR)) & "," & vbCrLf & _
+        "      ""angleDeg"": " & JsonNum(angleDeg) & "," & vbCrLf & _
+        "      ""lengthMm"": " & lengthPart & "," & vbCrLf & _
+        "      ""swFeatureName"": """ & JsonEscape(featName) & """" & vbCrLf & _
+        "    }"
+End Function
+
+Private Function ReadBendDirection(swModel As Object, swFeat As Object, ByRef innerR As Double, ByRef angleRad As Double, ByRef errMsg As String) As String
+    errMsg = ""
+    ReadBendDirection = ""
+
+    Dim typeName As String
+    typeName = swFeat.GetTypeName2
+    If Not IsBendFeatureType(typeName) Then
+        errMsg = "Unsupported bend feature type: " & typeName
+        Exit Function
+    End If
+
+    Dim bendDef As Object
+    Set bendDef = swFeat.GetDefinition
+    If bendDef Is Nothing Then
+        errMsg = "GetDefinition returned Nothing."
+        Exit Function
+    End If
+
+    Dim accessed As Boolean
+    accessed = False
+    On Error Resume Next
+    bendDef.AccessSelections swModel, Nothing
+    accessed = (Err.Number = 0)
+    Err.Clear
+
+    innerR = ToMm(CDbl(bendDef.BendRadius))
+    If Err.Number <> 0 Then
+        errMsg = "BendRadius: " & Err.Description
+        Err.Clear
+        GoTo ReleaseAndExit
+    End If
+
+    If typeName = "EdgeFlange" Or typeName = "MiterFlange" Then
+        ' Edge/Miter flange: BendAngle works; direction uses ReverseDirection (not BendDirection)
+        If Not ReadEdgeFlangeAngle(bendDef, angleRad, errMsg) Then GoTo ReleaseAndExit
+        ReadBendDirection = MapEdgeFlangeDirection(swFeat, bendDef, errMsg)
+    ElseIf typeName = "OneBend" Then
+        angleRad = CDbl(bendDef.BendAngle)
+        If Err.Number <> 0 Then
+            errMsg = "BendAngle: " & Err.Description
+            Err.Clear
+            GoTo ReleaseAndExit
+        End If
+        ReadBendDirection = MapOneBendDirection(bendDef, errMsg)
+    Else
+        angleRad = CDbl(bendDef.BendAngle)
+        If Err.Number <> 0 Then
+            errMsg = "BendAngle: " & Err.Description
+            Err.Clear
+            GoTo ReleaseAndExit
+        End If
+        ReadBendDirection = MapDirection(CLng(bendDef.BendDirection), errMsg)
+        If Err.Number <> 0 Then
+            errMsg = "BendDirection: " & Err.Description
+            Err.Clear
+            ReadBendDirection = ""
+        End If
+    End If
+
+    If Len(ReadBendDirection) = 0 Then
+        ReadBendDirection = ResolveBendDirectionFallback()
+    End If
+
+ReleaseAndExit:
+    If accessed Then
+        On Error Resume Next
+        bendDef.ReleaseSelectionAccess
+    End If
+    Exit Function
+
+Fail:
+    errMsg = "Failed to read bend: " & Err.Description
+    GoTo ReleaseAndExit
+End Function
+
+Private Function ReadEdgeFlangeAngle(bendDef As Object, ByRef angleRad As Double, ByRef errMsg As String) As Boolean
+    On Error Resume Next
+    angleRad = CDbl(bendDef.BendAngle)
+    If Err.Number = 0 Then
+        errMsg = ""
+        ReadEdgeFlangeAngle = True
+        Exit Function
+    End If
+    Err.Clear
+    angleRad = CDbl(bendDef.Angle)
+    If Err.Number = 0 Then
+        errMsg = ""
+        ReadEdgeFlangeAngle = True
+        Exit Function
+    End If
+    errMsg = "BendAngle: " & Err.Description
+    Err.Clear
+    ReadEdgeFlangeAngle = False
+End Function
+
+Private Function MapOneBendDirection(bendDef As Object, ByRef errMsg As String) As String
+    On Error Resume Next
+    Dim bendDown As Boolean
+    bendDown = bendDef.BendDown
+    If Err.Number <> 0 Then
+        Err.Clear
+        errMsg = "BendDown not available."
+        MapOneBendDirection = ""
+        Exit Function
+    End If
+    errMsg = ""
+    If bendDown Then
+        MapOneBendDirection = "down"
+    Else
+        MapOneBendDirection = "up"
+    End If
+End Function
+
+Private Function MapEdgeFlangeDirection(swFeat As Object, bendDef As Object, ByRef errMsg As String) As String
+    On Error Resume Next
+    Dim bendDir As Long
+    bendDir = CLng(bendDef.BendDirection)
+    If Err.Number = 0 Then
+        MapEdgeFlangeDirection = MapDirection(bendDir, errMsg)
+        If Len(MapEdgeFlangeDirection) > 0 Then Exit Function
+    End If
+    Err.Clear
+
+    Dim reversed As Boolean
+    reversed = bendDef.ReverseDirection
+    If Err.Number = 0 Then
+        errMsg = ""
+        If reversed Then
+            MapEdgeFlangeDirection = "down"
+        Else
+            MapEdgeFlangeDirection = "up"
+        End If
+        Exit Function
+    End If
+    Err.Clear
+
+    Dim dirFromSketch As String
+    dirFromSketch = GetBendDirectionFromFeatureSketch(swFeat)
+    If Len(dirFromSketch) > 0 Then
+        errMsg = ""
+        MapEdgeFlangeDirection = dirFromSketch
+        Exit Function
+    End If
+
+    If Not gFlatBendDirs Is Nothing Then
+        If gCurrentBendIndex > 0 And gCurrentBendIndex <= gFlatBendDirs.Count Then
+            errMsg = ""
+            MapEdgeFlangeDirection = gFlatBendDirs(gCurrentBendIndex - 1)
+            Exit Function
+        End If
+    End If
+
+    errMsg = "Bend direction not available on feature or flat-pattern bend lines."
+    MapEdgeFlangeDirection = ""
+End Function
+
+Private Function ResolveBendDirectionFallback() As String
+    ResolveBendDirectionFallback = GetFlatPatternDirectionByIndex(gCurrentBendIndex)
+    If Len(ResolveBendDirectionFallback) > 0 Then
+        gLastDirWarning = "BEND_DIRECTION_FROM_FLAT_PATTERN"
+        Exit Function
+    End If
+    ResolveBendDirectionFallback = "up"
+    gLastDirWarning = "BEND_DIRECTION_ASSUMED_UP"
+End Function
+
+Private Function GetFlatPatternDirectionByIndex(bendIndex As Long) As String
+    If bendIndex <= 0 Then Exit Function
+    If gFlatBendDirs Is Nothing Then Exit Function
+    If bendIndex > gFlatBendDirs.Count Then Exit Function
+    GetFlatPatternDirectionByIndex = gFlatBendDirs(bendIndex - 1)
+End Function
+
+Private Function PrepareFlatPatternForRead(swModel As Object) As Boolean
+    PrepareFlatPatternForRead = False
+    Dim swFlat As Object
+    Set swFlat = FindFeatureByType(swModel, "FlatPattern")
+    If swFlat Is Nothing Then Exit Function
+    If Not swFlat.IsSuppressed Then Exit Function
+    On Error Resume Next
+    swFlat.SetSuppression2 SW_UNSUPPRESS_FEATURE, SW_THIS_CONFIGURATION, Nothing
+    swModel.EditRebuild3
+    Err.Clear
+    PrepareFlatPatternForRead = True
+End Function
+
+Private Sub RestoreFlatPatternSuppression(swModel As Object, wasSuppressed As Boolean)
+    If Not wasSuppressed Then Exit Sub
+    Dim swFlat As Object
+    Set swFlat = FindFeatureByType(swModel, "FlatPattern")
+    If swFlat Is Nothing Then Exit Sub
+    On Error Resume Next
+    swFlat.SetSuppression2 SW_SUPPRESS_FEATURE, SW_THIS_CONFIGURATION, Nothing
+    swModel.EditRebuild3
+    Err.Clear
+End Sub
+
+Private Sub CollectFlatPatternBendDirections(swModel As Object)
+    Dim vFeats As Variant
+    vFeats = swModel.FeatureManager.GetFeatures(True)
+    If IsEmpty(vFeats) Then Exit Sub
+
+    Dim i As Long
+    Dim swFeat As Object
+    For i = LBound(vFeats) To UBound(vFeats)
+        Set swFeat = vFeats(i)
+        If swFeat.GetTypeName2 = "FlatPattern" Then
+            CollectBendDirectionsFromFeatureTree swFeat
+        End If
+    Next i
+
+    ' Bend-line sketches may sit next to the flat-pattern feature in the tree
+    If gFlatBendDirs.Count = 0 Then
+        For i = LBound(vFeats) To UBound(vFeats)
+            Set swFeat = vFeats(i)
+            AddBendDirectionsFromSketchFeature swFeat
+        Next i
+    End If
+
+    If gFlatBendDirs.Count = 0 Then
+        Set swFeat = swModel.FirstFeature
+        Do While Not swFeat Is Nothing
+            CollectBendDirectionsFromFeatureTree swFeat
+            Set swFeat = swFeat.GetNextFeature
+        Loop
+    End If
+End Sub
+
+Private Sub CollectBendDirectionsFromFeatureTree(swFeat As Object)
+    AddBendDirectionsFromSketchFeature swFeat
+
+    Dim swSub As Object
+    Set swSub = swFeat.GetFirstSubFeature
+    Do While Not swSub Is Nothing
+        CollectBendDirectionsFromFeatureTree swSub
+        Set swSub = swSub.GetNextSubFeature
+    Loop
+End Sub
+
+Private Sub AddFlatBendDirection(dir As String)
+    If Len(dir) = 0 Then Exit Sub
+    gFlatBendDirs.Add dir, CStr(gFlatBendDirs.Count)
+End Sub
+
+Private Sub AddBendDirectionsFromSketchFeature(swFeat As Object)
+    If swFeat.GetTypeName2 <> "ProfileFeature" Then Exit Sub
+
+    Dim swSketch As Object
+    Set swSketch = swFeat.GetSpecificFeature2
+    If swSketch Is Nothing Then Exit Sub
+
+    Dim vSegs As Variant
+    On Error Resume Next
+    vSegs = swSketch.GetSketchSegments
+    If Err.Number <> 0 Or IsEmpty(vSegs) Then
+        Err.Clear
+        Exit Sub
+    End If
+
+    Dim i As Long
+    For i = LBound(vSegs) To UBound(vSegs)
+        Dim seg As Object
+        Set seg = vSegs(i)
+        If seg.GetType = SW_SKETCH_LINE Then
+            AddFlatBendDirection TryGetSegmentBendDirection(seg)
+        End If
+    Next i
+End Sub
+
+Private Function TryGetSegmentBendDirection(seg As Object) As String
+    On Error Resume Next
+    Dim bendLineDir As Long
+    bendLineDir = seg.GetBendLineDirection()
+    If Err.Number = 0 Then
+        TryGetSegmentBendDirection = MapBendLineDirection(bendLineDir)
+        If Len(TryGetSegmentBendDirection) > 0 Then Exit Function
+    End If
+    Err.Clear
+    bendLineDir = seg.GetBendLineDirection2()
+    If Err.Number = 0 Then
+        TryGetSegmentBendDirection = MapBendLineDirection(bendLineDir)
+    End If
+    Err.Clear
+End Function
+
+Private Function GetBendDirectionFromFeatureSketch(swFeat As Object) As String
+    Dim swSub As Object
+    Set swSub = swFeat.GetFirstSubFeature
+    Do While Not swSub Is Nothing
+        If swSub.GetTypeName2 = "ProfileFeature" Then
+            Dim swSketch As Object
+            Set swSketch = swSub.GetSpecificFeature2
+            If Not swSketch Is Nothing Then
+                Dim dir As String
+                dir = GetFirstBendLineDirectionFromSketch(swSketch)
+                If Len(dir) > 0 Then
+                    GetBendDirectionFromFeatureSketch = dir
+                    Exit Function
+                End If
+            End If
+        End If
+        Set swSub = swSub.GetNextSubFeature
+    Loop
+End Function
+
+Private Function GetFirstBendLineDirectionFromSketch(swSketch As Object) As String
+    On Error Resume Next
+    Dim vSegs As Variant
+    vSegs = swSketch.GetSketchSegments
+    If Err.Number <> 0 Or IsEmpty(vSegs) Then
+        Err.Clear
+        Exit Function
+    End If
+
+    Dim i As Long
+    For i = LBound(vSegs) To UBound(vSegs)
+        Dim seg As Object
+        Set seg = vSegs(i)
+        If seg.GetType = SW_SKETCH_LINE Then
+            GetFirstBendLineDirectionFromSketch = TryGetSegmentBendDirection(seg)
+            If Len(GetFirstBendLineDirectionFromSketch) > 0 Then Exit Function
+        End If
+    Next i
+End Function
+
+Private Function MapBendLineDirection(bendLineDir As Long) As String
+    If bendLineDir = SW_BEND_LINE_UP Then
+        MapBendLineDirection = "up"
+    ElseIf bendLineDir = SW_BEND_LINE_DOWN Then
+        MapBendLineDirection = "down"
+    Else
+        MapBendLineDirection = ""
+    End If
+End Function
+
+Private Function MapDirection(bendDir As Long, ByRef errMsg As String) As String
+    If bendDir = SW_BEND_DIR_UP Then
+        MapDirection = "up"
+    ElseIf bendDir = SW_BEND_DIR_DOWN Then
+        MapDirection = "down"
+    Else
+        errMsg = "BendDirection is not set (value=" & bendDir & ")."
+        MapDirection = ""
+    End If
+End Function
+
+Private Function GetBendLengthMm(swFeat As Object) As Variant
+    On Error GoTo Fail
+    Dim typeName As String
+    typeName = swFeat.GetTypeName2
+
+    If typeName = "OneBend" Then
+        GetBendLengthMm = GetOneBendLengthMm(swFeat)
+        If Not IsEmpty(GetBendLengthMm) Then Exit Function
+    End If
+
+    If typeName = "EdgeFlange" Or typeName = "MiterFlange" Or typeName = "SM3dBend" Or typeName = "SketchBend" Then
+        GetBendLengthMm = GetFeatureSketchLengthMm(swFeat)
+        If Not IsEmpty(GetBendLengthMm) Then Exit Function
+    End If
+
+    Dim swSketch As Object
+    Set swSketch = swFeat.GetSpecificFeature2
+    If swSketch Is Nothing Then GoTo Fail
+
+    GetBendLengthMm = SumSketchSegmentsLengthMm(swSketch)
+    Exit Function
+Fail:
+    GetBendLengthMm = Empty
+End Function
+
+Private Function GetOneBendLengthMm(swFeat As Object) As Variant
+    On Error GoTo Fail
+    Dim bendDef As Object
+    Set bendDef = swFeat.GetDefinition
+    If bendDef Is Nothing Then GoTo Fail
+
+    Dim vSegs As Variant
+    vSegs = bendDef.FlatPatternSketchSegments2
+    If Err.Number <> 0 Or IsEmpty(vSegs) Then
+        Err.Clear
+        GoTo Fail
+    End If
+
+    Dim total As Double
+    total = SumSketchSegmentsArrayLength(vSegs)
+    If total > 0 Then
+        GetOneBendLengthMm = Round4(total * 1000#)
+    Else
+        GetOneBendLengthMm = Empty
+    End If
+    Exit Function
+Fail:
+    GetOneBendLengthMm = Empty
+End Function
+
+Private Function GetFeatureSketchLengthMm(swFeat As Object) As Variant
+    Dim swSub As Object
+    Set swSub = swFeat.GetFirstSubFeature
+    Do While Not swSub Is Nothing
+        If swSub.GetTypeName2 = "ProfileFeature" Then
+            Dim swSketch As Object
+            Set swSketch = swSub.GetSpecificFeature2
+            If Not swSketch Is Nothing Then
+                GetFeatureSketchLengthMm = SumSketchSegmentsLengthMm(swSketch)
+                If Not IsEmpty(GetFeatureSketchLengthMm) Then Exit Function
+            End If
+        End If
+        Set swSub = swSub.GetNextSubFeature
+    Loop
+    GetFeatureSketchLengthMm = Empty
+End Function
+
+Private Function SumSketchSegmentsLengthMm(swSketch As Object) As Variant
+    On Error GoTo Fail
+    Dim vSegs As Variant
+    vSegs = swSketch.GetSketchSegments
+    If Err.Number <> 0 Or IsEmpty(vSegs) Then GoTo Fail
+    Dim total As Double
+    total = SumSketchSegmentsArrayLength(vSegs)
+    If total > 0 Then
+        SumSketchSegmentsLengthMm = Round4(total * 1000#)
+    Else
+        SumSketchSegmentsLengthMm = Empty
+    End If
+    Exit Function
+Fail:
+    SumSketchSegmentsLengthMm = Empty
+End Function
+
+Private Function SumSketchSegmentsArrayLength(vSegs As Variant) As Double
+    On Error Resume Next
+    Dim total As Double
+    total = 0#
+    Dim i As Long
+    For i = LBound(vSegs) To UBound(vSegs)
+        Dim seg As Object
+        Set seg = vSegs(i)
+        If seg.GetLength > 0 Then total = total + seg.GetLength
+    Next i
+    SumSketchSegmentsArrayLength = total
+End Function
+
+Private Function FindFeatureByType(swModel As Object, typeName As String) As Object
+    Dim swFeat As Object
+    Set swFeat = swModel.FirstFeature
+    Do While Not swFeat Is Nothing
+        If swFeat.GetTypeName2 = typeName Then
+            Set FindFeatureByType = swFeat
+            Exit Function
+        End If
+        Set swFeat = swFeat.GetNextFeature
+    Loop
+    Set FindFeatureByType = Nothing
+End Function
+
+Private Function GetPartNumber(partPath As String) As String
+    Dim fileName As String
+    fileName = Mid(partPath, InStrRev(partPath, "\") + 1)
+    If InStrRev(fileName, ".") > 0 Then
+        GetPartNumber = Left(fileName, InStrRev(fileName, ".") - 1)
+    Else
+        GetPartNumber = fileName
+    End If
+End Function
+
+Private Function BuildJson(partPath As String, partNumber As String, thickness As Double, materialName As String, bendsJson As String, errors As String, warnings As String) As String
+    Dim fileName As String
+    fileName = Mid(partPath, InStrRev(partPath, "\") + 1)
+
+    Dim matJson As String
+    If Len(materialName) > 0 Then
+        matJson = """" & JsonEscape(materialName) & """"
+    Else
+        matJson = "null"
+    End If
+
+    BuildJson = "{" & vbCrLf & _
+        "  ""schemaVersion"": ""0.1""," & vbCrLf & _
+        "  ""exportedAt"": """ & JsonEscape(NowIso8601()) & """," & vbCrLf & _
+        "  ""source"": {" & vbCrLf & _
+        "    ""cad"": ""SolidWorks""," & vbCrLf & _
+        "    ""cadVersion"": """ & JsonEscape(swApp.RevisionNumber()) & """," & vbCrLf & _
+        "    ""cadLinkVersion"": ""0.1.0""," & vbCrLf & _
+        "    ""fileName"": """ & JsonEscape(fileName) & """," & vbCrLf & _
+        "    ""filePath"": """ & JsonEscape(partPath) & """" & vbCrLf & _
+        "  }," & vbCrLf & _
+        "  ""partNumber"": """ & JsonEscape(partNumber) & """," & vbCrLf & _
+        "  ""revision"": null," & vbCrLf & _
+        "  ""thickness"": " & JsonNum(thickness) & "," & vbCrLf & _
+        "  ""material"": " & matJson & "," & vbCrLf & _
+        "  ""fixedFace"": null," & vbCrLf & _
+        "  ""units"": ""mm""," & vbCrLf & _
+        "  ""coordinateSystem"": {" & vbCrLf & _
+        "    ""origin"": ""flatPattern""," & vbCrLf & _
+        "    ""description"": ""Phase 1: flat pattern coordinate""" & vbCrLf & _
+        "  }," & vbCrLf & _
+        "  ""bends"": [" & vbCrLf & bendsJson & vbCrLf & "  ]," & vbCrLf & _
+        "  ""errors"": " & JsonStringArray(errors) & "," & vbCrLf & _
+        "  ""warnings"": " & JsonStringArray(warnings) & vbCrLf & _
+        "}"
+End Function
+
+Private Function JsonStringArray(text As String) As String
+    Dim lines() As String
+    Dim cleaned As String
+    cleaned = Replace(text, vbCrLf, vbLf)
+    cleaned = Replace(cleaned, vbCr, vbLf)
+    lines = Split(cleaned, vbLf)
+
+    Dim result As String
+    result = "["
+    Dim i As Long
+    Dim first As Boolean
+    first = True
+    For i = LBound(lines) To UBound(lines)
+        If Len(Trim(lines(i))) > 0 Then
+            If Not first Then result = result & ", "
+            result = result & """" & JsonEscape(Trim(lines(i))) & """"
+            first = False
+        End If
+    Next i
+    result = result & "]"
+    JsonStringArray = result
+End Function
+
+Private Sub WriteUtf8(path As String, content As String)
+    Dim stream As Object
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 2
+    stream.Charset = "utf-8"
+    stream.Open
+    stream.WriteText content
+    stream.SaveToFile path, 2
+    stream.Close
+End Sub
+
+Private Sub ShowResult(partPath As String, outPath As String, bendCount As Long, thickness As String, errors As String, warnings As String)
+    Dim msg As String
+    msg = ""
+    If Len(outPath) > 0 Then msg = msg & "Output: " & outPath & vbCrLf
+    If Len(partPath) > 0 Then msg = msg & "Part: " & GetPartNumber(partPath) & vbCrLf
+    msg = msg & "Bends: " & bendCount & vbCrLf
+    If Len(thickness) > 0 Then msg = msg & "Thickness: " & thickness & " mm" & vbCrLf
+    If Len(errors) > 0 Then msg = msg & vbCrLf & errors
+    If Len(warnings) > 0 Then msg = msg & warnings
+    swApp.SendMsgToUser msg
+End Sub
+
+Private Function JsonEscape(value As String) As String
+    Dim s As String
+    s = value
+    s = Replace(s, "\", "\\")
+    s = Replace(s, """", "\""")
+    s = Replace(s, vbCrLf, "\n")
+    s = Replace(s, vbCr, "\n")
+    s = Replace(s, vbLf, "\n")
+    s = Replace(s, vbTab, "\t")
+    JsonEscape = s
+End Function
+
+Private Function JsonNum(value As Double) As String
+    JsonNum = Replace(CStr(Round(value, 4)), ",", ".")
+End Function
+
+Private Function Round4(value As Double) As Double
+    Round4 = Round(value, 4)
+End Function
+
+Private Function ToMm(valueMeters As Double) As Double
+    ToMm = Round4(valueMeters * 1000#)
+End Function
+
+Private Function NowIso8601() As String
+    NowIso8601 = Format(Now, "yyyy-mm-ddTHH:nn:ss") & "+09:00"
+End Function
