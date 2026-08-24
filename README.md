@@ -12,6 +12,14 @@ SolidWorks 2022 板金パーツから portal（板金製造支援）向けに `b
 
 Phase 1（`bend.json` のみ）は **v0.1.0 / develop 初回コミット** で達成済みです。
 
+> **M-BEND 3D 再現に関する注意**
+> 現行 VBA マクロの schema v0.1 は曲げ本数・R・角度・DXF 出力用の
+> レガシー形式です。`direction` は SolidWorks の方向値に依存するため、
+> これだけで M-BEND が表裏・固定側・可動側を一意に再現することは保証しません。
+> 決定論的な3D再現には schema v0.3 の `fixedFace.normal`,
+> `signedAngleDeg`, `axis`, `movingSidePoint` を使用します。
+> 仕様: [docs/bend-package-schema-v0.3.md](docs/bend-package-schema-v0.3.md)
+
 詳細要件: [docs/requirements.md](docs/requirements.md)  
 **マクロの登録・実行手順**: [macro/README.md](macro/README.md)
 

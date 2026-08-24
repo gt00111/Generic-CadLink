@@ -1,8 +1,8 @@
 # Generic CadLink 要件定義書
 
-> **版**: v0.3  
+> **版**: v0.4
 > **作成日**: 2026-08-21  
-> **ステータス**: Phase 1 着手可能 — 未確定事項は §12 を参照
+> **ステータス**: Phase 2 完了 / schema v0.3 幾何出力を設計中
 
 ---
 
@@ -90,7 +90,24 @@ portal 板金製造支援
 
 #### 4.2.1 `bend.json`（必須・正本）
 
-**スキーマ v0.1**（portal `DetectedBend` / `ProcessCondition` との対応を意識）:
+M-BEND で曲げ回転を一意に再現する新しい正本仕様は
+[`bend-package-schema-v0.3.md`](bend-package-schema-v0.3.md) とする。
+従来 schema v0.1 の `direction` は表示・旧連携用であり、決定論的な
+3D 曲げ再現には使用しない。
+
+schema v0.3 では以下を必須とする。
+
+- 右手系の展開座標系と `flatNormal`
+- `fixedFace.normal`（`outer/inner` 不明でも必須）
+- 各曲げの決定論的に向きを固定した3D軸
+- 実幾何から計算した `signedAngleDeg`
+- 可動側を示す `movingSidePoint`
+- JSON 曲げと DXF 曲げ線の1対1対応
+- `signedAngleDeg` から一意に派生した `direction` と `dxfLayer`
+
+取得不能時に `up` を仮定して成功扱いにすることを禁止する。
+
+**レガシースキーマ v0.1**（既存マクロ互換・M-BEND の3D再現には使用不可）:
 
 ```json
 {
@@ -139,9 +156,12 @@ portal 板金製造支援
 | `partNumber` | ○ | string | 品番 | `ProcessCondition.partNumber` 突合 |
 | `thickness` | ○ | number | 板厚 (mm) | `ProcessCondition.thickness` |
 | `material` | △ | string | 材質名（SW マテリアル名） | `ProcessCondition.material` |
-| `fixedFace` | - | `"inner"` \| `"outer"` \| null | 展開基準面（SW から取得できれば記録。社内固定ルールなし） | 参考情報 |
+| `fixedFace` | ○ (v0.3) | object | 法線必須、side 判定状態を分離 | M-BEND の回転基準 |
 | `bends[].id` | ○ | string | 曲げ ID（`B1`…） | DXF 線との対応キー |
-| `bends[].direction` | ○ | `"up"` \| `"down"` | 山折り / 谷折り | SW `BendDirection` 由来 |
+| `bends[].direction` | ○ | `"up"` \| `"down"` | `signedAngleDeg` から派生 | M-BEND の表示・検証 |
+| `bends[].signedAngleDeg` | ○ (v0.3) | number | 曲げ軸まわり右ねじ方向を正 | M-BEND の回転量 |
+| `bends[].axis` | ○ (v0.3) | object | start/end/direction の3D軸 | M-BEND の回転軸 |
+| `bends[].movingSidePoint` | ○ (v0.3) | number[3] | 展開状態の可動側代表点 | 回転対象側の決定 |
 | `bends[].innerRadius` | ○ | number | 内 R (mm) | `DetectedBend.innerRadius` |
 | `bends[].angleDeg` | ○ | number | 曲げ角度 (°) | `DetectedBend.angleDeg` |
 | `bends[].lengthMm` | △ | number | 曲げ線長 (mm) | `DetectedBend.lengthMm` |
@@ -151,12 +171,16 @@ portal 板金製造支援
 | `errors[]` | - | string[] | 致命エラー | 取込拒否理由 |
 | `warnings[]` | - | string[] | 警告 | UI 表示用 |
 
-**direction の定義**:
+**direction の定義（schema v0.3）**:
 
 | 値 | 意味 | DXF レイヤー |
 |---|---|---|
-| `up` | 山折り（SolidWorks `BendDirection` 由来） | `BEND_UP` |
-| `down` | 谷折り | `BEND_DOWN` |
+| `up` | `signedAngleDeg > 0` | `BEND_UP` |
+| `down` | `signedAngleDeg < 0` | `BEND_DOWN` |
+
+SolidWorks の `BendDirection` / `BendDown` 列挙値は診断用に保持してよいが、
+schema v0.3 の符号決定には使用しない。符号は展開基準面法線、決定論的な
+曲げ軸方向、曲げ後の可動面法線を同一の出力座標系へ変換して計算する。
 
 **曲げ順（加工順）の扱い** 【決定 2026-08-21・修正】:
 
