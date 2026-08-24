@@ -2,12 +2,15 @@
 
 SolidWorks 2022 板金パーツから portal（板金製造支援）向けに `bend.json` を出力する自作 CADLink。
 
-## Phase 1（現在）
+## Phase 2（現在）
 
-- **成果物**: C# マクロ — 板金曲げメタデータ → `bend.json`
-- **実行ファイル**: 初回セットアップ後 **`macro/BendExportMacro.swp`**（元ソース: `macro/BendExportMacro.swb`）
-- **出力先**: 開いている `.sldprt` と**同じフォルダ**の `bend.json`
+- **成果物**: VBA マクロ — 板金曲げメタデータ + 展開 DXF
+- **実行ファイル**: **`macro/BendExportMacro.swb`**（Late Binding・参照設定不要）
+- **出力先**: 開いている `.sldprt` と**同じフォルダ**の `bend.json` + `flat.dxf`
+- **レイヤー規約**: `macro/GenericCadLink.dxfmap`（`CUT` / `BEND_UP` / `BEND_DOWN`）
 - **加工順**: 出力しない（純正 CadLink → M-BEND と同じ分担。portal 側で決定）
+
+Phase 1（`bend.json` のみ）は **v0.1.0 / develop 初回コミット** で達成済みです。
 
 詳細要件: [docs/requirements.md](docs/requirements.md)  
 **マクロの登録・実行手順**: [macro/README.md](macro/README.md)
@@ -18,7 +21,7 @@ SolidWorks 2022 板金パーツから portal（板金製造支援）向けに `b
 
 1. 板金パーツを開いて **保存**
 2. **ツール → マクロ → 実行** → **`macro/BendExportMacro.swb`**
-3. 同フォルダに `bend.json` が出力される
+3. 同フォルダに `bend.json` と `flat.dxf` が出力される
 
 > 古い `.swp`（参照設定版）を使っている場合は、最新 **`BendExportMacro.swb`** に切り替えてください。  
 > 詳細: [macro/README.md](macro/README.md)
@@ -116,10 +119,11 @@ Generic CadLink/
   lib/                        … SW Interop DLL（手動配置）
 ```
 
-## 次の Phase
+## Phase 状態
 
-| Phase | 内容 |
-|---|---|
-| 2 | フラットパターン DXF + レイヤー規約 |
-| 3 | .NET アドイン（ツールバーボタン） |
-| 4 | portal 自動取込 |
+| Phase | 内容 | 状態 |
+|---|---|---|
+| 1 | `bend.json` マクロ | ✅ 実用可（v0.1.0） |
+| 2 | `flat.dxf` + レイヤー規約 | 🔧 実装済み — SW 実機検証待ち（v0.2.0） |
+| 3 | .NET アドイン（ツールバーボタン） | 未着手 |
+| 4 | portal 自動取込 | 未着手 |

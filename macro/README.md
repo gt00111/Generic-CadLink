@@ -3,6 +3,8 @@
 SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp` / `.swb` / `.dll`** です。  
 **`.cs` はソースコードであり、直接実行できません。**
 
+**Phase 2（v0.2.0）** から、同フォルダに **`bend.json` + `flat.dxf`** の両方が出力されます。
+
 ---
 
 ## 推奨: 初回セットアップ
@@ -13,8 +15,9 @@ SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp
 **参照設定なし** で **ツール → マクロ → 実行** からそのまま動きます。
 
 1. 板金 `.sldprt` を開いて **保存**
-2. **ツール → マクロ → 実行**
-3. 種類 **SWBasic Macros (*.swb)** → `macro/BendExportMacro.swb`
+2. **`GenericCadLink.slddxfmap`（または `GenericCadLink.dxfmap`）が `BendExportMacro.swb` と同じ `macro/` フォルダにあること**を確認（レイヤー名 `CUT` / `BEND_UP` / `BEND_DOWN` 用）
+3. **ツール → マクロ → 実行**
+4. 種類 **SWBasic Macros (*.swb)** → `macro/BendExportMacro.swb`
 
 ### 方法 B: `.swp` として保存（従来・任意）
 
@@ -48,10 +51,37 @@ SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp
 
 1. 板金 `.sldprt` を SolidWorks で開く（例: `samples\Stand-01.SLDPRT`）
 2. **必ず保存**（未保存だと `UNSAVED_DOCUMENT` エラー）
-3. **ツール → マクロ → 実行**
-4. ファイルの種類: **SW VBA Macros (*.swp)**（または登録済みマクロ一覧から **BendExportMacro**）
-5. `macro/BendExportMacro.swp` を選択して実行
-6. パーツと **同じフォルダ** に `bend.json` が出力される
+3. **`macro/GenericCadLink.slddxfmap` がマクロと同じフォルダにあることを確認**
+4. **ツール → マクロ → 実行**
+5. 種類 **SWBasic Macros (*.swb)** → `macro/BendExportMacro.swb`（または登録済み `.swp`）
+6. パーツと **同じフォルダ** に `bend.json` と `flat.dxf` が出力される
+
+---
+
+## Phase 2 出力（`flat.dxf`）
+
+| ファイル | 内容 |
+|---|---|
+| `bend.json` | 曲げメタデータ（Phase 1 同様） |
+| `flat.dxf` | 展開図 DXF（mm） |
+
+### レイヤー規約（`GenericCadLink.slddxfmap`）
+
+| SW エンティティ | DXF レイヤー |
+|---|---|
+| Visible Edges | `CUT` |
+| Bend Lines Up | `BEND_UP` |
+| Bend Lines Down | `BEND_DOWN` |
+| Sketch Entities | `SCRIBE` |
+
+DXF 出力は **ExportToDWG2**（曲げ線を含む）を優先し、出力後に **CUT / BEND_UP / BEND_DOWN** レイヤーへ後処理で割り当てます。  
+`ExportFlatPatternView` は ExportToDWG2 失敗時のみ試行します。
+
+### Phase 2 検証チェック
+
+1. DXF を AutoCAD / LibreCAD 等で開き、レイヤー `CUT` / `BEND_UP` / `BEND_DOWN` があること
+2. **曲げ線本数 = `bend.json` の `bends[]` 件数**
+3. 各曲げの山/谷が JSON `direction` とレイヤー（`BEND_UP` / `BEND_DOWN`）で一致すること
 
 ---
 
@@ -79,6 +109,8 @@ SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp
 | コンパイルエラー（ユーザ定義型は定義されていません） | **最新 `.swb` を使用**（Late Binding 版）。古い `.swp` は削除して `.swb` から再実行 |
 | 文字化け / `& vbCrLf` がそのまま表示 | 古いマクロを使用中。リポジトリの `.swb` から作り直す（メッセージは英語） |
 | 曲げ 0 件 | 最新 `.swb` で `.swp` を再作成。それでも 0 なら SW 上のフィーチャ名を共有 |
+| `flat.dxf` が出ない | フラットパターン未生成・抑制を確認。`DXF_EXPORT_FAILED` の詳細を共有 |
+| レイヤー名が `CUT` 等にならない | `macro/GenericCadLink.slddxfmap` の配置を確認。`.swb` と同じフォルダ必須 |
 
 ---
 
@@ -88,6 +120,8 @@ SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp
 |---|---|
 | **`macro/BendExportMacro.swb`** | ソース（テキスト）。編集 → 参照設定 → `.swp` 保存の元 |
 | **`macro/BendExportMacro.swp`** | **実行用**（各 PC で初回セットアップ時に作成） |
+| **`macro/GenericCadLink.slddxfmap`** | DXF レイヤーマップ（Phase 2 必須） |
+| **`macro/GenericCadLink.dxfmap`** | 上記の代替ファイル名（互換用） |
 | `macro/BendExportMacro.cs` | C# 版ソース（Phase 3 アドイン/DLL 用） |
 | `src/GenericCadLink.Macro/` | Visual Studio プロジェクト |
 

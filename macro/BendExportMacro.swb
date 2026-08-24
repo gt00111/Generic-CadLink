@@ -1,6 +1,7 @@
-' Generic CadLink - bend.json export (Phase 1)
+' Generic CadLink - bend.json + flat.dxf export (Phase 1-2)
 ' Late binding: no VBA References required (.swb can run directly)
 ' Run: Tools > Macro > Run > BendExportMacro.swb
+' Requires GenericCadLink.slddxfmap (or .dxfmap) in the same folder as this macro (layer mapping)
 
 Private Const SW_DOC_PART As Long = 1
 Private Const SW_BEND_DIR_UP As Long = 1
@@ -11,12 +12,22 @@ Private Const SW_BEND_LINE_DOWN As Long = 2
 Private Const SW_SUPPRESS_FEATURE As Long = 0
 Private Const SW_UNSUPPRESS_FEATURE As Long = 1
 Private Const SW_THIS_CONFIGURATION As Long = 2
+Private Const SW_EXPORT_SHEET_METAL As Long = 1
+Private Const SW_SM_OPT_GEOMETRY As Long = 1
+Private Const SW_SM_OPT_BEND_LINES As Long = 4
+Private Const SW_FP_OPT_GEOMETRY As Long = 1
+Private Const SW_FP_OPT_BEND_LINES As Long = 2
+Private Const CADLINK_VERSION As String = "0.2.0"
+Private Const DXF_MAP_FILE As String = "GenericCadLink.slddxfmap"
+Private Const DXF_MAP_FILE_ALT As String = "GenericCadLink.dxfmap"
 
 Dim swApp As Object
 Dim gFlatBendDirs As Object
+Dim gFlatBendLengths As Object
 Dim gCurrentBendIndex As Long
 Dim gLastDirWarning As String
 Dim gFlatPatternWasSuppressed As Boolean
+Dim gBendLengthUnknownCount As Long
 
 Sub main()
     If Not ConnectSwApp() Then Exit Sub
@@ -54,13 +65,13 @@ Private Sub ExportBendJson()
 
     If swModel Is Nothing Then
         errors = errors & "NO_ACTIVE_DOCUMENT: No open document." & vbCrLf
-        ShowResult "", "", 0, "", errors, warnings
+        ShowResult "", "", "", 0, "", errors, warnings
         Exit Sub
     End If
 
     If swModel.GetType <> SW_DOC_PART Then
         errors = errors & "NOT_PART: Open a sheet metal part (.sldprt)." & vbCrLf
-        ShowResult "", "", 0, "", errors, warnings
+        ShowResult "", "", "", 0, "", errors, warnings
         GoTo Cleanup
     End If
 
@@ -68,7 +79,7 @@ Private Sub ExportBendJson()
     partPath = swModel.GetPathName
     If Len(Trim(partPath)) = 0 Then
         errors = errors & "UNSAVED_DOCUMENT: Save the file before running." & vbCrLf
-        ShowResult "", "", 0, "", errors, warnings
+        ShowResult "", "", "", 0, "", errors, warnings
         GoTo Cleanup
     End If
 
@@ -76,14 +87,14 @@ Private Sub ExportBendJson()
     Set swPart = swModel
 
     If Not HasFlatPattern(swModel, errors, warnings) Then
-        ShowResult partPath, "", 0, "", errors, warnings
+        ShowResult partPath, "", "", 0, "", errors, warnings
         GoTo Cleanup
     End If
 
     Dim thickness As Double
     If Not GetThickness(swModel, swPart, thickness) Then
         errors = errors & "THICKNESS_UNKNOWN: Could not read sheet thickness." & vbCrLf
-        ShowResult partPath, "", 0, "", errors, warnings
+        ShowResult partPath, "", "", 0, "", errors, warnings
         GoTo Cleanup
     End If
 
@@ -101,18 +112,487 @@ Private Sub ExportBendJson()
     Dim partNumber As String
     partNumber = GetPartNumber(partPath)
 
-    Dim json As String
-    json = BuildJson(partPath, partNumber, thickness, materialName, bendsJson, errors, warnings)
-
     Dim outPath As String
     outPath = Left(partPath, InStrRev(partPath, "\")) & "bend.json"
+
+    Dim dxfPath As String
+    Dim dxfWarn As String
+    dxfPath = Left(partPath, InStrRev(partPath, "\")) & "flat.dxf"
+    If Not ExportFlatDxf(swModel, swPart, partPath, dxfPath, bendCount, dxfWarn) Then
+        errors = errors & "DXF_EXPORT_FAILED: Could not export flat.dxf." & vbCrLf
+    End If
+    If Len(dxfWarn) > 0 Then warnings = warnings & dxfWarn
+
+    bendsJson = PatchBendLengthsFromDxf(bendsJson, dxfPath)
+
+    If gBendLengthUnknownCount > 0 Then
+        warnings = warnings & "BEND_LENGTH_UNKNOWN: " & gBendLengthUnknownCount & " bend(s) - length not available from SW API." & vbCrLf
+    End If
+
+    Dim json As String
+    json = BuildJson(partPath, partNumber, thickness, materialName, bendsJson, errors, warnings)
     WriteUtf8 outPath, json
 
-    ShowResult partPath, outPath, bendCount, CStr(thickness), errors, warnings
+    ShowResult partPath, outPath, dxfPath, bendCount, CStr(thickness), errors, warnings
 
 Cleanup:
     RestoreRollbackBar swModel
 End Sub
+
+Private Function GetCadLinkMacroFolder() As String
+    On Error Resume Next
+    Dim folder As String
+    folder = swApp.GetCurrentMacroPathFolder
+    If Len(folder) > 0 Then
+        If Right(folder, 1) <> "\" Then folder = folder & "\"
+        GetCadLinkMacroFolder = folder
+    End If
+    Err.Clear
+End Function
+
+Private Function GetDxfMapPath() As String
+    Dim folder As String
+    folder = GetCadLinkMacroFolder()
+    If Len(folder) = 0 Then Exit Function
+    If Dir(folder & DXF_MAP_FILE) <> "" Then
+        GetDxfMapPath = folder & DXF_MAP_FILE
+    ElseIf Dir(folder & DXF_MAP_FILE_ALT) <> "" Then
+        GetDxfMapPath = folder & DXF_MAP_FILE_ALT
+    End If
+End Function
+
+Private Function TryExportFlatPatternView(swPart As Object, dxfPath As String, options As Long, mapPath As String, ByRef errDesc As String) As Boolean
+    errDesc = ""
+    On Error Resume Next
+
+    TryExportFlatPatternView = swPart.ExportFlatPatternView(dxfPath, options, mapPath, True, False, 0, 0)
+    If Err.Number <> 0 Then
+        errDesc = Err.Description
+        Err.Clear
+        TryExportFlatPatternView = False
+    End If
+    If TryExportFlatPatternView Then Exit Function
+
+    If Len(mapPath) > 0 Then
+        TryExportFlatPatternView = swPart.ExportFlatPatternView(dxfPath, options, "", True, False, 0, 0)
+        If Err.Number <> 0 Then
+            errDesc = Err.Description
+            Err.Clear
+            TryExportFlatPatternView = False
+        End If
+        If TryExportFlatPatternView Then Exit Function
+    End If
+
+    TryExportFlatPatternView = swPart.ExportFlatPatternView(dxfPath, options)
+    If Err.Number <> 0 Then
+        errDesc = Err.Description
+        Err.Clear
+        TryExportFlatPatternView = False
+    End If
+End Function
+
+Private Function ExportFlatDxf(swModel As Object, swPart As Object, partPath As String, dxfPath As String, expectedBendCount As Long, ByRef dxfWarn As String) As Boolean
+    dxfWarn = ""
+    ExportFlatDxf = False
+
+    Dim wasSuppressed As Boolean
+    wasSuppressed = PrepareFlatPatternForRead(swModel)
+
+    Dim mapPath As String
+    mapPath = GetDxfMapPath()
+    If Len(mapPath) = 0 Then
+        dxfWarn = dxfWarn & "DXF_MAP_MISSING: GenericCadLink.slddxfmap not found beside macro." & vbCrLf
+    End If
+
+    ActivateDxfMapFile mapPath
+
+    Dim ok As Boolean
+    ok = ExportFlatDxfViaExportToDWG2(swPart, partPath, dxfPath, mapPath)
+
+    If Not ok Then
+        Dim exportErr As String
+        Dim options As Long
+        options = SW_FP_OPT_GEOMETRY Or SW_FP_OPT_BEND_LINES
+        ok = TryExportFlatPatternView(swPart, dxfPath, options, mapPath, exportErr)
+        If Not ok And Len(exportErr) > 0 Then
+            dxfWarn = dxfWarn & "DXF_EXPORT_NOTE: ExportFlatPatternView failed (" & exportErr & ")." & vbCrLf
+        End If
+    End If
+
+    RestoreFlatPatternSuppression swModel, wasSuppressed
+
+    If Not ok Then Exit Function
+    If Dir(dxfPath) = "" Then
+        dxfWarn = dxfWarn & "DXF_EXPORT_FAILED: API returned success but file was not created." & vbCrLf
+        Exit Function
+    End If
+
+    Dim bendLineCount As Long
+    If Not RemapCadLinkDxfLayers(dxfPath, gFlatBendDirs, bendLineCount, dxfWarn) Then
+        dxfWarn = dxfWarn & "DXF_LAYER_REMAP_FAILED: Could not assign CUT/BEND layers." & vbCrLf
+    ElseIf expectedBendCount > 0 Then
+        If bendLineCount <> expectedBendCount Then
+            dxfWarn = dxfWarn & "DXF_BEND_LINE_MISMATCH: DXF bend lines=" & bendLineCount & ", bends[]=" & expectedBendCount & vbCrLf
+        End If
+    End If
+
+    ExportFlatDxf = True
+End Function
+
+Private Sub ActivateDxfMapFile(mapPath As String)
+    On Error Resume Next
+    Const SW_PREF_DXF_MAPPING As Long = 12
+    Const SW_PREF_DXF_NO_MAP_DIALOG As Long = 13
+    Const SW_PREF_DXF_MAP_INDEX As Long = 44
+    Const SW_PREF_DXF_MAP_FILES As Long = 23
+
+    swApp.SetUserPreferenceToggle SW_PREF_DXF_MAPPING, True
+    swApp.SetUserPreferenceToggle SW_PREF_DXF_NO_MAP_DIALOG, True
+
+    If Len(mapPath) = 0 Then Exit Sub
+
+    Dim idx As Long
+    idx = FindOrRegisterDxfMapFile(mapPath, SW_PREF_DXF_MAP_FILES)
+    If idx >= 0 Then swApp.SetUserPreferenceIntegerValue SW_PREF_DXF_MAP_INDEX, idx
+    Err.Clear
+End Sub
+
+Private Function FindOrRegisterDxfMapFile(mapPath As String, prefListId As Long) As Long
+    On Error Resume Next
+    FindOrRegisterDxfMapFile = -1
+
+    Dim vMaps As Variant
+    Dim i As Long
+    vMaps = swApp.GetUserPreferenceStringListValue(prefListId)
+    If Not IsEmpty(vMaps) Then
+        For i = LBound(vMaps) To UBound(vMaps)
+            If StrComp(CStr(vMaps(i)), mapPath, vbTextCompare) = 0 Then
+                FindOrRegisterDxfMapFile = i
+                Exit Function
+            End If
+        Next i
+    End If
+
+    swApp.SetUserPreferenceStringListValue prefListId, mapPath
+    vMaps = swApp.GetUserPreferenceStringListValue(prefListId)
+    If IsEmpty(vMaps) Then Exit Function
+    For i = LBound(vMaps) To UBound(vMaps)
+        If StrComp(CStr(vMaps(i)), mapPath, vbTextCompare) = 0 Then
+            FindOrRegisterDxfMapFile = i
+            Exit Function
+        End If
+    Next i
+End Function
+
+Private Function ExportFlatDxfViaExportToDWG2(swPart As Object, partPath As String, dxfPath As String, mapPath As String) As Boolean
+    On Error Resume Next
+    Dim smOptions As Long
+    smOptions = SW_SM_OPT_GEOMETRY Or SW_SM_OPT_BEND_LINES
+    ExportFlatDxfViaExportToDWG2 = swPart.ExportToDWG2(dxfPath, partPath, SW_EXPORT_SHEET_METAL, True, Empty, False, False, smOptions, Empty)
+    Err.Clear
+End Function
+
+Private Function RemapCadLinkDxfLayers(dxfPath As String, bendDirs As Object, ByRef bendLineCount As Long, ByRef remapWarn As String) As Boolean
+    bendLineCount = 0
+    RemapCadLinkDxfLayers = False
+
+    Dim content As String
+    content = ReadWholeFile(dxfPath)
+    If Len(content) = 0 Then Exit Function
+
+    content = InsertCadLinkLayersInContent(content)
+
+    Dim lines() As String
+    lines = SplitLinesAny(content)
+    RemapCadLinkEntityLayers lines, bendDirs, bendLineCount
+
+    WriteWholeFile dxfPath, JoinLines(lines)
+    RemapCadLinkDxfLayers = True
+End Function
+
+Private Function InsertCadLinkLayersInContent(content As String) As String
+    InsertCadLinkLayersInContent = content
+    If InStr(1, content, vbCrLf & "  2" & vbCrLf & "CUT" & vbCrLf, vbBinaryCompare) > 0 Then Exit Function
+
+    Dim layerPos As Long
+    layerPos = InStr(1, content, vbCrLf & "  2" & vbCrLf & "LAYER" & vbCrLf, vbBinaryCompare)
+    If layerPos = 0 Then Exit Function
+
+    Dim endTabPos As Long
+    endTabPos = InStr(layerPos, content, vbCrLf & "  0" & vbCrLf & "ENDTAB" & vbCrLf, vbBinaryCompare)
+    If endTabPos = 0 Then Exit Function
+
+    Dim block As String
+    block = vbCrLf & CadLinkLayerBlock("CUT", 7, "Continuous") & vbCrLf & _
+        CadLinkLayerBlock("BEND_UP", 3, "DASHED") & vbCrLf & _
+        CadLinkLayerBlock("BEND_DOWN", 4, "DASHED")
+
+    InsertCadLinkLayersInContent = Left$(content, endTabPos - 1) & block & Mid$(content, endTabPos)
+    InsertCadLinkLayersInContent = IncrementLayerTableCountInContent(InsertCadLinkLayersInContent, 3)
+End Function
+
+Private Function IncrementLayerTableCountInContent(content As String, addCount As Long) As String
+    IncrementLayerTableCountInContent = content
+    Dim layerPos As Long
+    layerPos = InStr(1, content, vbCrLf & "  2" & vbCrLf & "LAYER" & vbCrLf, vbBinaryCompare)
+    If layerPos = 0 Then Exit Function
+
+    Dim countPos As Long
+    countPos = InStr(layerPos, content, vbCrLf & " 70" & vbCrLf, vbBinaryCompare)
+    If countPos = 0 Then Exit Function
+
+    Dim lineStart As Long
+    lineStart = countPos + Len(vbCrLf & " 70" & vbCrLf)
+    Dim lineEnd As Long
+    lineEnd = InStr(lineStart, content, vbCrLf)
+    If lineEnd = 0 Then Exit Function
+
+    Dim oldCount As Long
+    oldCount = CLng(Trim$(Mid$(content, lineStart, lineEnd - lineStart)))
+    IncrementLayerTableCountInContent = Left$(content, lineStart - 1) & CStr(oldCount + addCount) & Mid$(content, lineEnd)
+End Function
+
+Private Function CadLinkLayerBlock(layerName As String, color As Long, lineType As String) As String
+    CadLinkLayerBlock = "  0" & vbCrLf & "LAYER" & vbCrLf & _
+        "  5" & vbCrLf & "CL" & layerName & vbCrLf & _
+        "330" & vbCrLf & "2" & vbCrLf & _
+        "100" & vbCrLf & "AcDbSymbolTableRecord" & vbCrLf & _
+        "100" & vbCrLf & "AcDbLayerTableRecord" & vbCrLf & _
+        "  2" & vbCrLf & layerName & vbCrLf & _
+        " 70" & vbCrLf & "0" & vbCrLf & _
+        " 62" & vbCrLf & CStr(color) & vbCrLf & _
+        "  6" & vbCrLf & lineType
+End Function
+
+Private Sub RemapCadLinkEntityLayers(lines() As String, bendDirs As Object, ByRef bendLineCount As Long)
+    bendLineCount = 0
+    Dim inEntities As Boolean
+    inEntities = False
+    Dim i As Long
+    i = 0
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  2" And lines(i + 1) = "ENTITIES" Then
+            inEntities = True
+            i = i + 2
+        ElseIf inEntities And lines(i) = "  0" Then
+            If lines(i + 1) = "ENDSEC" Then Exit Do
+            Dim entType As String
+            entType = lines(i + 1)
+            Dim targetLayer As String
+            targetLayer = ClassifyCadLinkEntityLayer(entType, lines, i, bendDirs, bendLineCount)
+            If Len(targetLayer) > 0 Then SetEntityLayerValue lines, i, targetLayer
+            i = i + 2
+        Else
+            i = i + 1
+        End If
+    Loop
+End Sub
+
+Private Function ClassifyCadLinkEntityLayer(entType As String, lines() As String, startIdx As Long, bendDirs As Object, ByRef bendLineCount As Long) As String
+    Dim linetype As String
+    linetype = ReadEntityGroupValue(lines, startIdx, "  6")
+
+    If entType = "LINE" And IsBendLineLinetype(linetype) Then
+        ClassifyCadLinkEntityLayer = BendLayerNameForIndex(bendDirs, bendLineCount)
+        bendLineCount = bendLineCount + 1
+        Exit Function
+    End If
+
+    Select Case entType
+        Case "LINE", "ARC", "LWPOLYLINE", "POLYLINE", "CIRCLE", "SPLINE", "ELLIPSE", "POINT"
+            ClassifyCadLinkEntityLayer = "CUT"
+    End Select
+End Function
+
+Private Function ReadEntityGroupValue(lines() As String, startIdx As Long, groupCode As String) As String
+    Dim i As Long
+    i = startIdx + 2
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  0" Then Exit Function
+        If lines(i) = groupCode Then
+            ReadEntityGroupValue = lines(i + 1)
+            Exit Function
+        End If
+        i = i + 2
+    Loop
+End Function
+
+Private Function IsBendLineLinetype(linetype As String) As Boolean
+    Select Case UCase$(Trim$(linetype))
+        Case "CENTER", "DASHED", "PHANTOM", "HIDDEN", "CENTERX2"
+            IsBendLineLinetype = True
+    End Select
+End Function
+
+Private Function BendLayerNameForIndex(bendDirs As Object, bendIdx As Long) As String
+    If Not bendDirs Is Nothing Then
+        If bendIdx >= 0 And bendIdx < bendDirs.Count Then
+            If bendDirs(bendIdx) = "down" Then
+                BendLayerNameForIndex = "BEND_DOWN"
+                Exit Function
+            End If
+        End If
+    End If
+    BendLayerNameForIndex = "BEND_UP"
+End Function
+
+Private Sub SetEntityLayerValue(lines() As String, startIdx As Long, layerName As String)
+    Dim i As Long
+    i = startIdx + 2
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  0" Then Exit Sub
+        If lines(i) = "  8" Then
+            lines(i + 1) = layerName
+            Exit Sub
+        End If
+        i = i + 2
+    Loop
+End Sub
+
+Private Function PatchBendLengthsFromDxf(bendsJson As String, dxfPath As String) As String
+    PatchBendLengthsFromDxf = bendsJson
+    If Dir(dxfPath) = "" Then Exit Function
+
+    Dim lengths() As Double
+    lengths = ExtractBendLineLengthsFromDxf(dxfPath)
+    If UBound(lengths) < LBound(lengths) Then Exit Function
+
+    Dim result As String
+    result = bendsJson
+    Dim i As Long
+    For i = LBound(lengths) To UBound(lengths)
+        Dim updated As String
+        updated = ReplaceFirstNullLengthMm(result, lengths(i))
+        If updated = result Then Exit For
+        result = updated
+        gBendLengthUnknownCount = gBendLengthUnknownCount - 1
+        If gBendLengthUnknownCount < 0 Then gBendLengthUnknownCount = 0
+    Next i
+    PatchBendLengthsFromDxf = result
+End Function
+
+Private Function ReplaceFirstNullLengthMm(json As String, lengthMm As Double) As String
+    Dim marker As String
+    marker = """lengthMm"": null"
+    Dim pos As Long
+    pos = InStr(json, marker)
+    If pos = 0 Then
+        ReplaceFirstNullLengthMm = json
+        Exit Function
+    End If
+    ReplaceFirstNullLengthMm = Left$(json, pos - 1) & """lengthMm"": " & JsonNum(lengthMm) & Mid$(json, pos + Len(marker))
+End Function
+
+Private Function ExtractBendLineLengthsFromDxf(dxfPath As String) As Double()
+    Dim emptyArr(-1 To -1) As Double
+    ExtractBendLineLengthsFromDxf = emptyArr
+
+    Dim content As String
+    content = ReadWholeFile(dxfPath)
+    If Len(content) = 0 Then Exit Function
+
+    Dim lines() As String
+    lines = SplitLinesAny(content)
+
+    Dim lengths() As Double
+    ReDim lengths(0)
+    Dim count As Long
+    count = 0
+
+    Dim inEntities As Boolean
+    inEntities = False
+    Dim i As Long
+    i = 0
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  2" And lines(i + 1) = "ENTITIES" Then
+            inEntities = True
+            i = i + 2
+        ElseIf inEntities And lines(i) = "  0" Then
+            If lines(i + 1) = "ENDSEC" Then Exit Do
+            If lines(i + 1) = "LINE" Then
+                Dim lt As String
+                lt = ReadEntityGroupValue(lines, i, "  6")
+                Dim layerName As String
+                layerName = ReadEntityGroupValue(lines, i, "  8")
+                If IsBendLineLinetype(lt) Or layerName = "BEND_UP" Or layerName = "BEND_DOWN" Then
+                    Dim segLen As Double
+                    segLen = ReadLineEntityLengthMm(lines, i)
+                    If segLen > 0 Then
+                        ReDim Preserve lengths(count)
+                        lengths(count) = Round4(segLen)
+                        count = count + 1
+                    End If
+                End If
+            End If
+            i = i + 2
+        Else
+            i = i + 1
+        End If
+    Loop
+
+    If count = 0 Then
+        ExtractBendLineLengthsFromDxf = emptyArr
+    Else
+        ReDim Preserve lengths(count - 1)
+        ExtractBendLineLengthsFromDxf = lengths
+    End If
+End Function
+
+Private Function ReadLineEntityLengthMm(lines() As String, startIdx As Long) As Double
+    On Error GoTo Fail
+    Dim x1 As Double, y1 As Double, x2 As Double, y2 As Double
+    Dim got1 As Boolean, got2 As Boolean
+    got1 = False
+    got2 = False
+    Dim i As Long
+    i = startIdx + 2
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  0" Then Exit Do
+        If lines(i) = " 10" Then x1 = CDbl(lines(i + 1)): got1 = True
+        If lines(i) = " 20" Then y1 = CDbl(lines(i + 1)): got1 = True
+        If lines(i) = " 11" Then x2 = CDbl(lines(i + 1)): got2 = True
+        If lines(i) = " 21" Then y2 = CDbl(lines(i + 1)): got2 = True
+        i = i + 2
+    Loop
+    If got1 And got2 Then
+        ReadLineEntityLengthMm = Sqr((x2 - x1) ^ 2 + (y2 - y1) ^ 2)
+    End If
+    Exit Function
+Fail:
+    ReadLineEntityLengthMm = 0
+End Function
+
+Private Function ReadWholeFile(path As String) As String
+    On Error GoTo Fail
+    Dim fn As Integer
+    fn = FreeFile
+    Open path For Binary As #fn
+    ReadWholeFile = Input$(LOF(fn), fn)
+    Close #fn
+    Exit Function
+Fail:
+    ReadWholeFile = ""
+End Function
+
+Private Sub WriteWholeFile(path As String, content As String)
+    On Error Resume Next
+    Dim fn As Integer
+    fn = FreeFile
+    Open path For Binary As #fn
+    Put #fn, , content
+    Close #fn
+End Sub
+
+Private Function SplitLinesAny(content As String) As String()
+    Dim normalized As String
+    normalized = Replace(content, vbCrLf, vbLf)
+    normalized = Replace(normalized, vbCr, vbLf)
+    SplitLinesAny = Split(normalized, vbLf)
+End Function
+
+Private Function JoinLines(lines() As String) As String
+    JoinLines = Join(lines, vbCrLf)
+End Function
 
 Private Sub RestoreRollbackBar(swModel As Object)
     ' AccessSelections leaves rollback bar — move it back to end
@@ -130,9 +610,6 @@ Private Function HasFlatPattern(swModel As Object, ByRef errors As String, ByRef
         errors = errors & "NO_FLAT_PATTERN: Flat pattern feature not found." & vbCrLf
         HasFlatPattern = False
         Exit Function
-    End If
-    If swFeat.IsSuppressed Then
-        warnings = warnings & "FLAT_PATTERN_SUPPRESSED: Flat pattern is suppressed (folded view). Bend export continues." & vbCrLf
     End If
     HasFlatPattern = True
 End Function
@@ -194,7 +671,9 @@ Private Function CollectBendsJson(swModel As Object, ByRef warnings As String, B
     bendCount = 0
 
     Set gFlatBendDirs = CreateObject("Scripting.Dictionary")
+    Set gFlatBendLengths = CreateObject("Scripting.Dictionary")
     gCurrentBendIndex = 0
+    gBendLengthUnknownCount = 0
     gFlatPatternWasSuppressed = PrepareFlatPatternForRead(swModel)
     CollectFlatPatternBendDirections swModel
     RestoreFlatPatternSuppression swModel, gFlatPatternWasSuppressed
@@ -234,6 +713,10 @@ Private Function CollectBendsJson(swModel As Object, ByRef warnings As String, B
         End If
         If Len(warnLine) > 0 Then warnings = warnings & warnLine & vbCrLf
     Next i
+
+    If gBendLengthUnknownCount > 0 Then
+        ' Filled from flat.dxf after export when possible; keep summary only if still unknown.
+    End If
 
     CollectBendsJson = result
 End Function
@@ -308,8 +791,7 @@ Private Function BendToJson(swModel As Object, swFeat As Object, bendIndex As Lo
     Dim lengthPart As String
     If IsEmpty(lengthMm) Then
         lengthPart = "null"
-        If Len(warning) > 0 Then warning = warning & vbCrLf
-        warning = warning & "BEND_LENGTH_UNKNOWN: '" & featName & "' bend length not available."
+        gBendLengthUnknownCount = gBendLengthUnknownCount + 1
     Else
         lengthPart = JsonNum(CDbl(lengthMm))
     End If
@@ -576,6 +1058,11 @@ Private Sub AddFlatBendDirection(dir As String)
     gFlatBendDirs.Add dir, CStr(gFlatBendDirs.Count)
 End Sub
 
+Private Sub AddFlatBendLength(lengthMeters As Double)
+    If lengthMeters <= 0 Then Exit Sub
+    gFlatBendLengths.Add Round4(lengthMeters * 1000#), CStr(gFlatBendLengths.Count)
+End Sub
+
 Private Sub AddBendDirectionsFromSketchFeature(swFeat As Object)
     If swFeat.GetTypeName2 <> "ProfileFeature" Then Exit Sub
 
@@ -597,6 +1084,9 @@ Private Sub AddBendDirectionsFromSketchFeature(swFeat As Object)
         Set seg = vSegs(i)
         If seg.GetType = SW_SKETCH_LINE Then
             AddFlatBendDirection TryGetSegmentBendDirection(seg)
+            On Error Resume Next
+            AddFlatBendLength seg.GetLength
+            Err.Clear
         End If
     Next i
 End Sub
@@ -678,6 +1168,13 @@ Private Function MapDirection(bendDir As Long, ByRef errMsg As String) As String
     End If
 End Function
 
+Private Function GetFlatPatternLengthByIndex(bendIndex As Long) As Variant
+    If bendIndex <= 0 Then Exit Function
+    If gFlatBendLengths Is Nothing Then Exit Function
+    If bendIndex > gFlatBendLengths.Count Then Exit Function
+    GetFlatPatternLengthByIndex = gFlatBendLengths(bendIndex - 1)
+End Function
+
 Private Function GetBendLengthMm(swFeat As Object) As Variant
     On Error GoTo Fail
     Dim typeName As String
@@ -686,10 +1183,14 @@ Private Function GetBendLengthMm(swFeat As Object) As Variant
     If typeName = "OneBend" Then
         GetBendLengthMm = GetOneBendLengthMm(swFeat)
         If Not IsEmpty(GetBendLengthMm) Then Exit Function
+        GetBendLengthMm = GetFlatPatternLengthByIndex(gCurrentBendIndex)
+        If Not IsEmpty(GetBendLengthMm) Then Exit Function
     End If
 
     If typeName = "EdgeFlange" Or typeName = "MiterFlange" Or typeName = "SM3dBend" Or typeName = "SketchBend" Then
         GetBendLengthMm = GetFeatureSketchLengthMm(swFeat)
+        If Not IsEmpty(GetBendLengthMm) Then Exit Function
+        GetBendLengthMm = GetFlatPatternLengthByIndex(gCurrentBendIndex)
         If Not IsEmpty(GetBendLengthMm) Then Exit Function
     End If
 
@@ -815,7 +1316,7 @@ Private Function BuildJson(partPath As String, partNumber As String, thickness A
         "  ""source"": {" & vbCrLf & _
         "    ""cad"": ""SolidWorks""," & vbCrLf & _
         "    ""cadVersion"": """ & JsonEscape(swApp.RevisionNumber()) & """," & vbCrLf & _
-        "    ""cadLinkVersion"": ""0.1.0""," & vbCrLf & _
+        "    ""cadLinkVersion"": """ & CADLINK_VERSION & """," & vbCrLf & _
         "    ""fileName"": """ & JsonEscape(fileName) & """," & vbCrLf & _
         "    ""filePath"": """ & JsonEscape(partPath) & """" & vbCrLf & _
         "  }," & vbCrLf & _
@@ -869,10 +1370,11 @@ Private Sub WriteUtf8(path As String, content As String)
     stream.Close
 End Sub
 
-Private Sub ShowResult(partPath As String, outPath As String, bendCount As Long, thickness As String, errors As String, warnings As String)
+Private Sub ShowResult(partPath As String, jsonPath As String, dxfPath As String, bendCount As Long, thickness As String, errors As String, warnings As String)
     Dim msg As String
     msg = ""
-    If Len(outPath) > 0 Then msg = msg & "Output: " & outPath & vbCrLf
+    If Len(jsonPath) > 0 Then msg = msg & "bend.json: " & jsonPath & vbCrLf
+    If Len(dxfPath) > 0 Then msg = msg & "flat.dxf: " & dxfPath & vbCrLf
     If Len(partPath) > 0 Then msg = msg & "Part: " & GetPartNumber(partPath) & vbCrLf
     msg = msg & "Bends: " & bendCount & vbCrLf
     If Len(thickness) > 0 Then msg = msg & "Thickness: " & thickness & " mm" & vbCrLf

@@ -1,0 +1,6 @@
+Visible Edges;CUT;7;CONTINUOUS
+Hidden Edges;HIDDEN;8;HIDDEN
+Bend Lines Up;BEND_UP;3;DASHED
+Bend Lines Down;BEND_DOWN;4;DASHED
+Sketch Entities;SCRIBE;5;CONTINUOUS
+Construction Geometry;CONSTRUCTION;9;CENTER
