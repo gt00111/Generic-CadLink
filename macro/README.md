@@ -3,7 +3,40 @@
 SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp` / `.swb` / `.dll`** です。  
 **`.cs` はソースコードであり、直接実行できません。**
 
-**Phase 2（v0.2.0）** から、同フォルダに **`bend.json` + `flat.dxf`** の両方が出力されます。
+**Phase 2（v0.2.1）** から **`{exportRoot}\{品番}\bend.json` + `flat.dxf`** を出力します。
+
+---
+
+## 出力先（案 A）
+
+```
+{exportRoot}\
+  Y248-Y100-1002\
+    bend.json
+    flat.dxf
+  Y23Y-Y101-1001\
+    bend.json
+    flat.dxf
+```
+
+| 設定 | 内容 |
+|---|---|
+| **`macro/cadlink.config.json`** | `exportRoot` … 展開フォルダ（共有パス等） |
+| **`exportRoot` が空** | `.sldprt` と同じフォルダ直下の **`CadLinkExport\`** を使用 |
+| **品番フォルダ** | ファイル名（拡張子除く）= サブフォルダ名 |
+
+### 本番設定例
+
+`macro/cadlink.config.json`:
+
+```json
+{
+  "exportRoot": "\\\\server\\CadLinkExport"
+}
+```
+
+ローカル検証のままなら `"exportRoot": ""` のままで、  
+`samples\CadLinkExport\Y248-Y100-1002\` のように出力されます。
 
 ---
 
@@ -54,7 +87,7 @@ SolidWorks の **ツール → マクロ → 実行** で選べるのは **`.swp
 3. **`macro/GenericCadLink.slddxfmap` がマクロと同じフォルダにあることを確認**
 4. **ツール → マクロ → 実行**
 5. 種類 **SWBasic Macros (*.swb)** → `macro/BendExportMacro.swb`（または登録済み `.swp`）
-6. パーツと **同じフォルダ** に `bend.json` と `flat.dxf` が出力される
+6. **`CadLinkExport\{品番}\`**（または設定した `exportRoot\{品番}\`）に `bend.json` と `flat.dxf` が出力される
 
 ---
 
@@ -120,6 +153,7 @@ DXF 出力は **ExportToDWG2**（曲げ線を含む）を優先し、出力後�
 |---|---|
 | **`macro/BendExportMacro.swb`** | ソース（テキスト）。編集 → 参照設定 → `.swp` 保存の元 |
 | **`macro/BendExportMacro.swp`** | **実行用**（各 PC で初回セットアップ時に作成） |
+| **`macro/cadlink.config.json`** | 出力先 `exportRoot`（展開フォルダ） |
 | **`macro/GenericCadLink.slddxfmap`** | DXF レイヤーマップ（Phase 2 必須） |
 | **`macro/GenericCadLink.dxfmap`** | 上記の代替ファイル名（互換用） |
 | `macro/BendExportMacro.cs` | C# 版ソース（Phase 3 アドイン/DLL 用） |

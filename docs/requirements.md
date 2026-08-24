@@ -29,13 +29,14 @@
 以下が **品番ごとの出力フォルダ** に生成されること。
 
 ```
-{出力先}\
-  bend.json
-  flat.dxf      … Phase 2 以降
+{exportRoot}\
+  {品番}\
+    bend.json
+    flat.dxf      … Phase 2 以降
   preview.png   … 任意（Phase 1〜2 では出力しない）
 ```
 
-出力先の本番経路は **未決定**。Phase 1 は **`.sldprt` と同じフォルダ** に直接出力し、挙動確認後に変更する（サブフォルダ `{品番}\` 構成も後から検討可）。
+`exportRoot` は `macro/cadlink.config.json` で指定。未設定時は `.sldprt` 横の `CadLinkExport\`。
 
 portal はこのパッケージを取り込み、既存の `ProcessCondition` / シミュレーション / 判断エンジンへ流す（portal 側は将来 `smsupport:import:bendPackage` 等で実装）。
 
@@ -200,14 +201,16 @@ portal 板金製造支援
 | 項目 | 内容 |
 |---|---|
 | 本番パス | **未決定** — 挙動確認後に `cadlink.config.json` 等へ反映 |
-| Phase 1 既定 | **`.sldprt` と同じフォルダ** に `bend.json` を直接出力（サブフォルダなし） |
-| 将来 | `{品番}\` サブフォルダや共有サーバパスへ変更する可能性あり |
+| Phase 1 既定 | **`{exportRoot}\{品番}\`** に `bend.json` + `flat.dxf`（`macro/cadlink.config.json` の `exportRoot`） |
+| `exportRoot` 未設定 | `.sldprt` 同フォルダの **`CadLinkExport\`** を展開フォルダとして使用 |
+| 将来 | Phase 3 アドイン UI から出力先変更 |
 | 上書き | 既存ファイルは上書き（`exportedAt` で判別） |
 
 ```text
-C:\Projects\ABC-123.sldprt   … 入力
-C:\Projects\bend.json        … Phase 1 出力（同フォルダ）
-C:\Projects\flat.dxf         … Phase 2 以降
+C:\Projects\ABC-123.sldprt              … 入力
+\\server\CadLinkExport\ABC-123\        … 出力（exportRoot + 品番）
+  bend.json
+  flat.dxf
 ```
 
 ---
@@ -355,7 +358,7 @@ CadLink 完成後、portal 側で以下を実装する（**本プロジェクト
 | Q1 | SolidWorks バージョン | **2022** |
 | Q4 | 品番取得元 | **ファイル名**（`.sldprt` 除く） |
 | Q6 | 材質取得元 | **SW マテリアル名** |
-| Q7 | 出力先 | **未決定** — Phase 1 は **sldprt 同フォルダ** に直接出力。後から変更可 |
+| Q7 | 出力先 | **`{exportRoot}\{品番}\`** — `macro/cadlink.config.json` の `exportRoot`（空なら `CadLinkExport\`） |
 | Q8 | preview.png | **Phase 1〜2 では不要**（§4.2.3 参照） |
 | Q10 | fixedFace | **社内固定なし** — SW から取れれば記録 |
 | Q11 | 曲げ順 | **純正 CadLink 同等** — CadLink は加工順を出さず **portal が決定** |

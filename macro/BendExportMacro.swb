@@ -17,9 +17,11 @@ Private Const SW_SM_OPT_GEOMETRY As Long = 1
 Private Const SW_SM_OPT_BEND_LINES As Long = 4
 Private Const SW_FP_OPT_GEOMETRY As Long = 1
 Private Const SW_FP_OPT_BEND_LINES As Long = 2
-Private Const CADLINK_VERSION As String = "0.2.0"
+Private Const CADLINK_VERSION As String = "0.2.1"
 Private Const DXF_MAP_FILE As String = "GenericCadLink.slddxfmap"
 Private Const DXF_MAP_FILE_ALT As String = "GenericCadLink.dxfmap"
+Private Const CONFIG_FILE As String = "cadlink.config.json"
+Private Const DEFAULT_EXPORT_FOLDER As String = "CadLinkExport"
 
 Dim swApp As Object
 Dim gFlatBendDirs As Object
@@ -112,12 +114,20 @@ Private Sub ExportBendJson()
     Dim partNumber As String
     partNumber = GetPartNumber(partPath)
 
+    Dim outputDir As String
+    outputDir = ResolvePartOutputDir(partPath, partNumber, warnings)
+    If Len(outputDir) = 0 Then
+        errors = errors & "OUTPUT_DIR_FAILED: Could not create export folder." & vbCrLf
+        ShowResult partPath, "", "", 0, "", errors, warnings
+        GoTo Cleanup
+    End If
+
     Dim outPath As String
-    outPath = Left(partPath, InStrRev(partPath, "\")) & "bend.json"
+    outPath = outputDir & "bend.json"
 
     Dim dxfPath As String
     Dim dxfWarn As String
-    dxfPath = Left(partPath, InStrRev(partPath, "\")) & "flat.dxf"
+    dxfPath = outputDir & "flat.dxf"
     If Not ExportFlatDxf(swModel, swPart, partPath, dxfPath, bendCount, dxfWarn) Then
         errors = errors & "DXF_EXPORT_FAILED: Could not export flat.dxf." & vbCrLf
     End If
@@ -1299,6 +1309,103 @@ Private Function GetPartNumber(partPath As String) As String
     End If
 End Function
 
+Private Function GetConfigFilePath() As String
+    Dim folder As String
+    folder = GetCadLinkMacroFolder()
+    If Len(folder) = 0 Then Exit Function
+    GetConfigFilePath = folder & CONFIG_FILE
+End Function
+
+Private Function ReadExportRootFromConfig() As String
+    Dim configPath As String
+    configPath = GetConfigFilePath()
+    If Len(configPath) = 0 Then Exit Function
+    If Dir(configPath) = "" Then Exit Function
+
+    Dim content As String
+    content = ReadWholeFile(configPath)
+    ReadExportRootFromConfig = Trim$(GetConfigStringValue(content, "exportRoot"))
+End Function
+
+Private Function GetConfigStringValue(content As String, key As String) As String
+    Dim marker As String
+    marker = """" & key & """"
+    Dim pos As Long
+    pos = InStr(1, content, marker, vbBinaryCompare)
+    If pos = 0 Then Exit Function
+
+    pos = InStr(pos, content, ":")
+    If pos = 0 Then Exit Function
+
+    pos = InStr(pos, content, """")
+    If pos = 0 Then Exit Function
+
+    Dim posEnd As Long
+    posEnd = InStr(pos + 1, content, """")
+    If posEnd = 0 Then Exit Function
+
+    GetConfigStringValue = Mid$(content, pos + 1, posEnd - pos - 1)
+    GetConfigStringValue = Replace(GetConfigStringValue, "\\", "\")
+End Function
+
+Private Function ResolvePartOutputDir(partPath As String, partNumber As String, ByRef warnings As String) As String
+    Dim exportRoot As String
+    exportRoot = ReadExportRootFromConfig()
+
+    If Len(exportRoot) = 0 Then
+        exportRoot = Left(partPath, InStrRev(partPath, "\")) & DEFAULT_EXPORT_FOLDER
+    End If
+
+    exportRoot = Trim$(exportRoot)
+    If Right(exportRoot, 1) = "\" Then exportRoot = Left(exportRoot, Len(exportRoot) - 1)
+
+    Dim folder As String
+    folder = exportRoot & "\" & SanitizeFolderName(partNumber) & "\"
+
+    If EnsureFolderExists(folder) Then
+        ResolvePartOutputDir = folder
+    End If
+End Function
+
+Private Function SanitizeFolderName(name As String) As String
+    Dim s As String
+    s = Trim$(name)
+    s = Replace(s, "\", "-")
+    s = Replace(s, "/", "-")
+    s = Replace(s, ":", "-")
+    s = Replace(s, "*", "-")
+    s = Replace(s, "?", "-")
+    s = Replace(s, """", "-")
+    s = Replace(s, "<", "-")
+    s = Replace(s, ">", "-")
+    s = Replace(s, "|", "-")
+    SanitizeFolderName = s
+End Function
+
+Private Function EnsureFolderExists(folderPath As String) As Boolean
+    Dim path As String
+    path = folderPath
+    If Right(path, 1) = "\" Then path = Left(path, Len(path) - 1)
+    If Len(path) = 0 Then Exit Function
+
+    If Dir(path, vbDirectory) <> "" Then
+        EnsureFolderExists = True
+        Exit Function
+    End If
+
+    Dim slashPos As Long
+    slashPos = InStrRev(path, "\")
+    If slashPos > 0 Then
+        Dim parent As String
+        parent = Left(path, slashPos)
+        If Not EnsureFolderExists(parent) Then Exit Function
+    End If
+
+    On Error Resume Next
+    MkDir path
+    EnsureFolderExists = (Dir(path, vbDirectory) <> "")
+End Function
+
 Private Function BuildJson(partPath As String, partNumber As String, thickness As Double, materialName As String, bendsJson As String, errors As String, warnings As String) As String
     Dim fileName As String
     fileName = Mid(partPath, InStrRev(partPath, "\") + 1)
@@ -1375,6 +1482,7 @@ Private Sub ShowResult(partPath As String, jsonPath As String, dxfPath As String
     msg = ""
     If Len(jsonPath) > 0 Then msg = msg & "bend.json: " & jsonPath & vbCrLf
     If Len(dxfPath) > 0 Then msg = msg & "flat.dxf: " & dxfPath & vbCrLf
+    If Len(jsonPath) > 0 Then msg = msg & "Folder: " & Left(jsonPath, InStrRev(jsonPath, "\")) & vbCrLf
     If Len(partPath) > 0 Then msg = msg & "Part: " & GetPartNumber(partPath) & vbCrLf
     msg = msg & "Bends: " & bendCount & vbCrLf
     If Len(thickness) > 0 Then msg = msg & "Thickness: " & thickness & " mm" & vbCrLf
