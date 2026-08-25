@@ -1,36 +1,45 @@
-# GenericCadLink.Macro.dll を macro\ にビルドする
+# Build the SolidWorks 2022 schema-v0.3 macro DLL into macro\.
 $ErrorActionPreference = "Stop"
-$root = Split-Path $PSScriptRoot -Parent
-$lib = Join-Path $root "lib"
-$out = Join-Path $root "macro\BendExportMacro.dll"
-$src = Join-Path $root "src\GenericCadLink.Macro"
 
-if (-not (Test-Path (Join-Path $lib "SolidWorks.Interop.sldworks.dll"))) {
+$projectRoot = Split-Path $PSScriptRoot -Parent
+$libDir = Join-Path $projectRoot "lib"
+$outputPath = Join-Path $projectRoot "macro\BendExportMacro.dll"
+$sourceDir = Join-Path $projectRoot "src\GenericCadLink.Macro"
+
+if (-not (Test-Path -LiteralPath (Join-Path $libDir "SolidWorks.Interop.sldworks.dll"))) {
     & (Join-Path $PSScriptRoot "setup-lib.ps1")
 }
 
-$csc = "${env:WINDIR}\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-if (-not (Test-Path $csc)) {
-    throw "csc.exe not found"
+$sdkRoot = Join-Path $env:ProgramFiles "dotnet\sdk"
+$compiler = Get-ChildItem -LiteralPath $sdkRoot -Directory |
+    Sort-Object { [version]($_.Name.Split('-')[0]) } -Descending |
+    ForEach-Object { Join-Path $_.FullName "Roslyn\bincore\csc.dll" } |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
+if (-not $compiler) { throw ".NET SDK Roslyn compiler was not found." }
+
+$framework = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319"
+$gac = Join-Path $env:WINDIR "Microsoft.Net\assembly\GAC_MSIL"
+$references = @(
+    (Join-Path $framework "mscorlib.dll"),
+    (Join-Path $gac "System\v4.0_4.0.0.0__b77a5c561934e089\System.dll"),
+    (Join-Path $gac "System.Core\v4.0_4.0.0.0__b77a5c561934e089\System.Core.dll"),
+    (Join-Path $gac "System.Windows.Forms\v4.0_4.0.0.0__b77a5c561934e089\System.Windows.Forms.dll"),
+    (Join-Path $libDir "SolidWorks.Interop.sldworks.dll"),
+    (Join-Path $libDir "SolidWorks.Interop.swconst.dll")
+)
+foreach ($reference in $references) {
+    if (-not (Test-Path -LiteralPath $reference)) { throw "Reference not found: $reference" }
 }
 
-$refs = @(
-    "/reference:`"$(Join-Path $lib 'SolidWorks.Interop.sldworks.dll')`""
-    "/reference:`"$(Join-Path $lib 'SolidWorks.Interop.swconst.dll')`""
-    "/reference:System.dll"
-    "/reference:System.Core.dll"
-    "/reference:System.Windows.Forms.dll"
+$arguments = @(
+    $compiler, "/nologo", "/target:library", "/platform:x64", "/langversion:latest", "/nostdlib+",
+    "/out:$outputPath"
 )
+$arguments += $references | ForEach-Object { "/reference:$_" }
+$arguments += Get-ChildItem -LiteralPath $sourceDir -Recurse -Filter "*.cs" | Select-Object -ExpandProperty FullName
 
-$files = Get-ChildItem $src -Recurse -Filter *.cs | ForEach-Object { "`"$($_.FullName)`"" }
-
-$args = @(
-    "/nologo", "/target:library", "/platform:anycpu",
-    "/out:`"$out`"",
-    "/langversion:5"
-) + $refs + $files
-
-Write-Host "Building $out ..."
-& $csc @args
+Write-Host "Building $outputPath ..."
+& dotnet @arguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Host "OK: $out"
+Write-Host "OK: $outputPath"

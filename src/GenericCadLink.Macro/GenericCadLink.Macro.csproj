@@ -43,8 +43,13 @@
   <ItemGroup>
     <Compile Include="BendExportMacro.cs" />
     <Compile Include="BendExporter.cs" />
+    <Compile Include="Dxf\DxfBendLineMatcher.cs" />
+    <Compile Include="Geometry\VectorMath.cs" />
+    <Compile Include="Geometry\CoordinateFrame.cs" />
+    <Compile Include="Geometry\SolidWorksGeometryExtractor.cs" />
     <Compile Include="Json\BendPackageWriter.cs" />
     <Compile Include="Models\BendPackage.cs" />
+    <Compile Include="Validation\BendPackageValidator.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

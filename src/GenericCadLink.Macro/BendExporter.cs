@@ -1,461 +1,240 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using GenericCadLink.Macro.Dxf;
+using GenericCadLink.Macro.Geometry;
 using GenericCadLink.Macro.Json;
 using GenericCadLink.Macro.Models;
+using GenericCadLink.Macro.Validation;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
 namespace GenericCadLink.Macro
 {
-    /// <summary>
-    /// SolidWorks 2022 板金パーツから bend.json を生成する。
-    /// 加工順（sequence）は出力しない（純正 CadLink / M-BEND 分担に合わせる）。
-    /// </summary>
     public sealed class BendExporter
     {
         private const double RadToDeg = 180.0 / Math.PI;
-        private const string CadLinkVersion = "0.1.0";
-
-        private static readonly HashSet<string> BendFeatureTypes = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "SM3dBend",
-            "EdgeFlange",
-            "SketchBend",
-            "SweepBend",
-            "MiterFlange",
-        };
-
-        private static readonly HashSet<string> ExcludedFeatureTypes = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "Hem",
-            "Jog",
-        };
-
+        private const string CadLinkVersion = "0.3.0";
         private readonly SldWorks _app;
 
-        public BendExporter(SldWorks app)
+        public BendExporter(SldWorks app) { _app = app ?? throw new ArgumentNullException(nameof(app)); }
+
+        public ExportResult ExportActiveDocument()
         {
-            _app = app ?? throw new ArgumentNullException(nameof(app));
+            return Export((ModelDoc2)_app.ActiveDoc);
         }
 
-        public BendPackage ExportActiveDocument()
+        public ExportResult Export(ModelDoc2 model)
         {
-            var model = (ModelDoc2)_app.ActiveDoc;
-            return Export(model);
-        }
-
-        public BendPackage Export(ModelDoc2 model)
-        {
-            var package = InitPackage(model);
-
-            if (model == null)
-            {
-                package.Errors.Add("NO_ACTIVE_DOCUMENT: 開いているドキュメントがありません。");
-                return package;
-            }
-
-            if (model.GetType() != (int)swDocumentTypes_e.swDocPART)
-            {
-                package.Errors.Add("NOT_PART: 板金パーツ（.sldprt）を開いてください。");
-                return package;
-            }
+            var package = NewPackage();
+            if (!ValidateDocument(model, package)) return new ExportResult(package, null, null);
 
             var path = model.GetPathName();
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                package.Errors.Add("UNSAVED_DOCUMENT: ファイルを保存してから実行してください。");
-                return package;
-            }
-
-            FillSourceAndPartNumber(package, model, path);
-
-            if (!HasFlatPattern(model, package))
-                return package;
-
+            FillIdentity(package, path);
             var part = (PartDoc)model;
-            if (!TryFillThickness(part, model, package))
-                return package;
-
+            if (!FillThickness(part, model, package)) return WriteFailure(package, path);
             FillMaterial(part, package);
-            FillFixedFace(model, package);
-            CollectBends(model, package);
 
-            if (package.Bends.Count == 0 && package.Errors.Count == 0)
-                package.Warnings.Add("NO_BENDS: 曲げフィーチャが見つかりませんでした。");
-
-            return package;
-        }
-
-        public string WriteBendJson(BendPackage package, string partFilePath)
-        {
-            var directory = Path.GetDirectoryName(partFilePath);
-            if (string.IsNullOrEmpty(directory))
-                throw new InvalidOperationException("出力先ディレクトリを特定できません。");
-
-            var outputPath = Path.Combine(directory, "bend.json");
-            BendPackageWriter.Write(package, outputPath);
-            return outputPath;
-        }
-
-        private static BendPackage InitPackage(ModelDoc2 model)
-        {
-            return new BendPackage
-            {
-                ExportedAt = DateTimeOffset.Now.ToString("o"),
-                Source = new SourceInfo { CadLinkVersion = CadLinkVersion },
-            };
-        }
-
-        private void FillSourceAndPartNumber(BendPackage package, ModelDoc2 model, string path)
-        {
-            package.Source.FilePath = path;
-            package.Source.FileName = Path.GetFileName(path);
-            package.Source.CadVersion = _app.RevisionNumber();
-            package.PartNumber = Path.GetFileNameWithoutExtension(path);
-        }
-
-        private static bool HasFlatPattern(ModelDoc2 model, BendPackage package)
-        {
             var flatPattern = FindFeatureByType(model, "FlatPattern");
-            if (flatPattern == null)
+            var geometry = new SolidWorksGeometryExtractor(model);
+            CoordinateFrame frame; FixedFaceInfo fixedFace; Face2 fixedFaceObject; string frameError;
+            if (!geometry.TryCreateFixedFrame(flatPattern, out frame, out fixedFace, out fixedFaceObject, out frameError))
             {
-                package.Errors.Add("NO_FLAT_PATTERN: フラットパターンがありません。板金フィーチャを確認してください。");
-                return false;
+                package.Errors.Add(frameError + ": cannot create deterministic flat coordinate system.");
+                return WriteFailure(package, path);
+            }
+            package.CoordinateSystem = frame.ToInfo();
+            package.FixedFace = fixedFace;
+
+            var candidates = CollectOneBends(model);
+            var folded = new List<BendDraft>();
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                var draft = CaptureFoldedBend(model, geometry, candidates[i], fixedFaceObject, frame, i + 1);
+                folded.Add(draft);
+                if (draft.Error != null) package.Errors.Add("BEND_GEOMETRY_FAILED[" + draft.Id + "]: " + draft.Error);
             }
 
-    If flatPattern.IsSuppressed()
-    {
-        package.Warnings.Add("FLAT_PATTERN_SUPPRESSED: Flat pattern is suppressed (folded view). Bend export continues.");
-    }
-
-    return true;
-        }
-
-        private static bool TryFillThickness(PartDoc part, ModelDoc2 model, BendPackage package)
-        {
-            if (TryGetThicknessFromSheetMetalFeature(model, out var thickness) ||
-                TryGetThicknessFromPart(part, out thickness))
-            {
-                package.Thickness = Round(ToMm(thickness));
-                return true;
-            }
-
-            package.Errors.Add("THICKNESS_UNKNOWN: 板厚を取得できません。");
-            return false;
-        }
-
-        private static bool TryGetThicknessFromSheetMetalFeature(ModelDoc2 model, out double thickness)
-        {
-            thickness = 0;
-            var feature = FindFeatureByType(model, "SheetMetal");
-            if (feature == null)
-                return false;
-
-            var data = feature.GetDefinition() as ISheetMetalFeatureData;
-            if (data == null)
-                return false;
-
-            data.AccessSelections(model, null);
+            var wasSuppressed = flatPattern.IsSuppressed();
             try
             {
-                thickness = data.Thickness;
-                return thickness > 0;
+                if (wasSuppressed)
+                {
+                    flatPattern.SetSuppression2((int)swFeatureSuppressionAction_e.swUnSuppressFeature, (int)swInConfigurationOpts_e.swThisConfiguration, null);
+                    model.EditRebuild3();
+                }
+
+                foreach (var draft in folded)
+                {
+                    if (draft.Error != null) continue;
+                    AxisInfo axis; string axisError;
+                    if (!geometry.TryReadFlatAxis(draft.Feature, frame, out axis, out axisError))
+                    {
+                        package.Errors.Add("BEND_AXIS_FAILED[" + draft.Id + "]: " + axisError);
+                        continue;
+                    }
+                    string signError;
+                    var signedAngle = geometry.ComputeSignedAngle(axis, frame, draft.Folded.BentFaceNormalModel, draft.AngleDeg, out signError);
+                    if (signError != null)
+                    {
+                        package.Errors.Add("SIGNED_ANGLE_FAILED[" + draft.Id + "]: " + signError);
+                        continue;
+                    }
+                    var direction = signedAngle > 0 ? "up" : "down";
+                    var layer = signedAngle > 0 ? "BEND_UP" : "BEND_DOWN";
+                    package.Bends.Add(new BendInfo
+                    {
+                        Id = draft.Id,
+                        InnerRadius = Round(draft.InnerRadiusMm),
+                        AngleDeg = Round(draft.AngleDeg),
+                        SignedAngleDeg = Round(signedAngle),
+                        Direction = direction,
+                        Axis = axis,
+                        StationaryFaceId = draft.Folded.StationaryFaceId,
+                        MovingFaceId = draft.Folded.MovingFaceId,
+                        MovingSidePoint = geometry.CreateMovingSidePoint(axis, frame),
+                        DxfLayer = layer,
+                        LengthMm = Round(VectorMath.Length(VectorMath.Subtract(axis.End, axis.Start))),
+                        SwFeatureName = draft.Feature.Name ?? "",
+                    });
+                }
             }
             finally
             {
-                data.ReleaseSelectionAccess();
+                if (wasSuppressed)
+                {
+                    flatPattern.SetSuppression2((int)swFeatureSuppressionAction_e.swSuppressFeature, (int)swInConfigurationOpts_e.swThisConfiguration, null);
+                    model.EditRebuild3();
+                }
+                model.ClearSelection2(true);
+            }
+
+            var outputDir = ResolveOutputDirectory(path, package.PartNumber);
+            Directory.CreateDirectory(outputDir);
+            var dxfPath = Path.Combine(outputDir, "flat.dxf");
+            if (!ExportDxf(part, path, dxfPath, frame))
+                package.Errors.Add("DXF_EXPORT_FAILED: SolidWorks ExportToDWG2 returned false.");
+            else
+            {
+                try { DxfBendLineMatcher.MatchAndRewrite(dxfPath, package.Bends, package.Errors); }
+                catch (Exception ex) { package.Errors.Add("DXF_POSTPROCESS_FAILED: " + ex.Message); }
+            }
+
+            BendPackageValidator.Validate(package);
+            var jsonPath = Path.Combine(outputDir, "bend.json");
+            BendPackageWriter.Write(package, jsonPath);
+            return new ExportResult(package, jsonPath, File.Exists(dxfPath) ? dxfPath : null);
+        }
+
+        private BendDraft CaptureFoldedBend(ModelDoc2 model, SolidWorksGeometryExtractor geometry, IFeature feature, Face2 fixedFace, CoordinateFrame frame, int index)
+        {
+            var draft = new BendDraft { Id = "B" + index, Feature = feature };
+            var data = feature.GetDefinition() as IOneBendFeatureData;
+            if (data == null) { draft.Error = "ONE_BEND_DEFINITION_MISSING"; return draft; }
+            data.AccessSelections(model, null);
+            try
+            {
+                draft.AngleDeg = Math.Abs(data.BendAngle * RadToDeg);
+                draft.InnerRadiusMm = data.BendRadius * 1000.0;
+            }
+            finally { data.ReleaseSelectionAccess(); }
+            draft.Folded = geometry.CaptureFoldedGeometry(feature, fixedFace, frame, draft.AngleDeg);
+            draft.Error = draft.Folded.Error;
+            return draft;
+        }
+
+        private static List<IFeature> CollectOneBends(ModelDoc2 model)
+        {
+            var result = new List<IFeature>();
+            var feature = (IFeature)model.FirstFeature();
+            while (feature != null)
+            {
+                CollectOneBends(feature, false, result);
+                feature = (IFeature)feature.GetNextFeature();
+            }
+            return result;
+        }
+
+        private static void CollectOneBends(IFeature feature, bool underFlatPattern, List<IFeature> result)
+        {
+            var type = feature.GetTypeName2();
+            var inFlat = underFlatPattern || type == "FlatPattern";
+            if (type == "OneBend" && !inFlat) result.Add(feature);
+            var child = (IFeature)feature.GetFirstSubFeature();
+            while (child != null)
+            {
+                CollectOneBends(child, inFlat, result);
+                child = (IFeature)child.GetNextSubFeature();
             }
         }
 
-        private static bool TryGetThicknessFromPart(PartDoc part, out double thickness)
+        private static bool ExportDxf(PartDoc part, string modelPath, string dxfPath, CoordinateFrame frame)
         {
-            thickness = 0;
+            const int exportSheetMetal = 1;
+            const int geometryAndBendLines = 1 + 4;
+            return part.ExportToDWG2(dxfPath, modelPath, exportSheetMetal, true, frame.ToDxfAlignment(), false, false, geometryAndBendLines, null);
+        }
+
+        private static bool ValidateDocument(ModelDoc2 model, BendPackage package)
+        {
+            if (model == null) { package.Errors.Add("NO_ACTIVE_DOCUMENT"); return false; }
+            if (model.GetType() != (int)swDocumentTypes_e.swDocPART) { package.Errors.Add("NOT_PART"); return false; }
+            if (string.IsNullOrWhiteSpace(model.GetPathName())) { package.Errors.Add("UNSAVED_DOCUMENT"); return false; }
+            if (FindFeatureByType(model, "FlatPattern") == null) { package.Errors.Add("NO_FLAT_PATTERN"); return false; }
+            return true;
+        }
+
+        private BendPackage NewPackage() => new BendPackage { ExportedAt = DateTimeOffset.Now.ToString("o"), Source = new SourceInfo { CadLinkVersion = CadLinkVersion } };
+        private void FillIdentity(BendPackage p, string path) { p.Source.FilePath = path; p.Source.FileName = Path.GetFileName(path); p.Source.CadVersion = _app.RevisionNumber(); p.PartNumber = Path.GetFileNameWithoutExtension(path); }
+
+        private static bool FillThickness(PartDoc part, ModelDoc2 model, BendPackage package)
+        {
+            var feature = FindFeatureByType(model, "SheetMetal");
+            var data = feature == null ? null : feature.GetDefinition() as ISheetMetalFeatureData;
+            if (data == null) { package.Errors.Add("THICKNESS_UNKNOWN"); return false; }
+            data.AccessSelections(model, null);
             try
             {
-                thickness = part.GetSheetMetalThickness();
-                return thickness > 0;
-            }
-            catch
-            {
+                package.Thickness = Round(data.Thickness * 1000.0);
+                if (package.Thickness > 0) return true;
+                package.Errors.Add("THICKNESS_UNKNOWN");
                 return false;
             }
+            finally { data.ReleaseSelectionAccess(); }
         }
 
         private static void FillMaterial(PartDoc part, BendPackage package)
         {
-            try
-            {
-                string database;
-                string materialName = part.GetMaterialPropertyName2("", out database);
-                if (!string.IsNullOrWhiteSpace(materialName))
-                    package.Material = materialName.Trim();
-            }
-            catch
-            {
-                package.Warnings.Add("MATERIAL_UNKNOWN: Material name not found.");
-            }
+            try { string database; package.Material = part.GetMaterialPropertyName2("", out database); }
+            catch { package.Warnings.Add("MATERIAL_UNKNOWN"); }
         }
 
-        private static void FillFixedFace(ModelDoc2 model, BendPackage package)
+        private static string ResolveOutputDirectory(string partPath, string partNumber)
         {
-            var flatPattern = FindFeatureByType(model, "FlatPattern");
-            if (flatPattern == null)
-                return;
-
-            var data = flatPattern.GetDefinition() as IFlatPatternFeatureData;
-            if (data == null)
-                return;
-
-            data.AccessSelections(model, null);
-            try
+            var root = Path.Combine(Path.GetDirectoryName(partPath), "CadLinkExport");
+            var config = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cadlink.config.json");
+            if (File.Exists(config))
             {
-                Face2 face = data.FixedFace2;
-                if (face == null)
-                    return;
-
-                var normal = (double[])face.Normal;
-                if (normal == null || normal.Length < 3)
-                    return;
-
-                // 参考情報として記録（社内固定ルールなし）
-                package.FixedFace = normal[2] >= 0 ? "outer" : "inner";
+                var text = File.ReadAllText(config);
+                var marker = "\"exportRoot\""; var at = text.IndexOf(marker, StringComparison.Ordinal);
+                if (at >= 0) { var colon = text.IndexOf(':', at); var first = text.IndexOf('"', colon + 1); var last = first < 0 ? -1 : text.IndexOf('"', first + 1); if (last > first + 1) root = text.Substring(first + 1, last - first - 1).Replace("\\\\", "\\"); }
             }
-            catch
-            {
-                // fixedFace は任意
-            }
-            finally
-            {
-                data.ReleaseSelectionAccess();
-            }
+            return Path.Combine(root, Sanitize(partNumber));
         }
 
-        private void CollectBends(ModelDoc2 model, BendPackage package)
-        {
-            var bendIndex = 0;
-            var features = (object[])model.FeatureManager.GetFeatures(true);
-            if (features == null)
-                return;
+        private static string Sanitize(string value) { foreach (var c in Path.GetInvalidFileNameChars()) value = value.Replace(c, '-'); return value; }
+        private ExportResult WriteFailure(BendPackage p, string partPath) { var dir = ResolveOutputDirectory(partPath, p.PartNumber); Directory.CreateDirectory(dir); var json = Path.Combine(dir, "bend.json"); BendPackageValidator.Validate(p); BendPackageWriter.Write(p, json); return new ExportResult(p, json, null); }
+        private static IFeature FindFeatureByType(ModelDoc2 model, string type) { var f = (IFeature)model.FirstFeature(); while (f != null) { if (f.GetTypeName2() == type) return f; f = (IFeature)f.GetNextFeature(); } return null; }
+        private static double Round(double value) => Math.Round(value, 6, MidpointRounding.AwayFromZero);
 
-            foreach (IFeature feature in features)
-            {
-                var typeName = feature.GetTypeName2();
+        private sealed class BendDraft { public string Id; public IFeature Feature; public double AngleDeg; public double InnerRadiusMm; public FoldedBendGeometry Folded; public string Error; }
+    }
 
-                if (ExcludedFeatureTypes.Contains(typeName))
-                {
-                    package.Warnings.Add(
-                        string.Format("SKIPPED_FEATURE: '{0}' ({1}) not supported in Phase 1.", feature.Name, typeName));
-                }
-                else if (BendFeatureTypes.Contains(typeName))
-                {
-                    bendIndex++;
-                    BendInfo bend;
-                    string warning;
-                    if (TryCreateBendInfo(model, feature, bendIndex, out bend, out warning))
-                        package.Bends.Add(bend);
-                    else
-                    {
-                        bendIndex--;
-                        if (!string.IsNullOrEmpty(warning))
-                            package.Warnings.Add(warning);
-                    }
-                }
-            }
-        }
-
-        private bool TryCreateBendInfo(
-            ModelDoc2 model,
-            IFeature feature,
-            int bendIndex,
-            out BendInfo bend,
-            out string warning)
-        {
-            bend = null;
-            warning = null;
-
-            var direction = TryGetDirection(model, feature, out var innerRadius, out var angleRad, out var dirWarning);
-            if (direction == null)
-            {
-                warning = $"BEND_PARSE_FAILED: '{feature.Name}' — {dirWarning ?? "曲げ情報を読み取れません。"}";
-                return false;
-            }
-
-            var lengthMm = TryGetBendLengthMm(model, feature);
-
-            bend = new BendInfo
-            {
-                Id = "B" + bendIndex,
-                Direction = direction,
-                DxfLayer = direction == "up" ? "BEND_UP" : "BEND_DOWN",
-                InnerRadius = Round(ToMm(innerRadius)),
-                AngleDeg = Round(angleRad * RadToDeg),
-                LengthMm = lengthMm.HasValue ? Round(lengthMm.Value) : (double?)null,
-                SwFeatureName = feature.Name ?? "",
-            };
-
-            if (!lengthMm.HasValue)
-                warning = $"BEND_LENGTH_UNKNOWN: '{feature.Name}' の曲げ線長を取得できませんでした。";
-
-            return true;
-        }
-
-        private static string TryGetDirection(
-            ModelDoc2 model,
-            IFeature feature,
-            out double innerRadius,
-            out double angleRad,
-            out string error)
-        {
-            innerRadius = 0;
-            angleRad = 0;
-            error = null;
-
-            var definition = feature.GetDefinition();
-            if (definition == null)
-            {
-                error = "GetDefinition が null を返しました。";
-                return null;
-            }
-
-            if (definition is ISheetMetalBendFeatureData bendData)
-                return ReadBendFeatureData(model, bendData, out innerRadius, out angleRad, out error);
-
-            if (definition is IEdgeFlangeFeatureData edgeFlange)
-                return ReadEdgeFlangeData(model, edgeFlange, out innerRadius, out angleRad, out error);
-
-            if (definition is ISketchBendFeatureData sketchBend)
-                return ReadSketchBendData(model, sketchBend, out innerRadius, out angleRad, out error);
-
-            error = "未対応の曲げフィーチャ型です。";
-            return null;
-        }
-
-        private static string ReadBendFeatureData(
-            ModelDoc2 model,
-            ISheetMetalBendFeatureData data,
-            out double innerRadius,
-            out double angleRad,
-            out string error)
-        {
-            data.AccessSelections(model, null);
-            try
-            {
-                innerRadius = data.BendRadius;
-                angleRad = data.BendAngle;
-                return MapDirection(data.BendDirection, out error);
-            }
-            finally
-            {
-                data.ReleaseSelectionAccess();
-            }
-        }
-
-        private static string ReadEdgeFlangeData(
-            ModelDoc2 model,
-            IEdgeFlangeFeatureData data,
-            out double innerRadius,
-            out double angleRad,
-            out string error)
-        {
-            data.AccessSelections(model, null);
-            try
-            {
-                innerRadius = data.BendRadius;
-                angleRad = data.BendAngle;
-                var direction = MapDirection(data.BendDirection, out error);
-                if (direction != null)
-                    return direction;
-                error = null;
-                return data.ReverseDirection ? "down" : "up";
-            }
-            finally
-            {
-                data.ReleaseSelectionAccess();
-            }
-        }
-
-        private static string ReadSketchBendData(
-            ModelDoc2 model,
-            ISketchBendFeatureData data,
-            out double innerRadius,
-            out double angleRad,
-            out string error)
-        {
-            data.AccessSelections(model, null);
-            try
-            {
-                innerRadius = data.BendRadius;
-                angleRad = data.BendAngle;
-                return MapDirection(data.BendDirection, out error);
-            }
-            finally
-            {
-                data.ReleaseSelectionAccess();
-            }
-        }
-
-        private static string MapDirection(swBendDirection_e direction, out string error)
-        {
-            error = null;
-            switch (direction)
-            {
-                case swBendDirection_e.swBendDirectionUp:
-                    return "up";
-                case swBendDirection_e.swBendDirectionDown:
-                    return "down";
-                default:
-                    error = "曲げ方向（BendDirection）が未設定です。";
-                    return null;
-            }
-        }
-
-        private static double? TryGetBendLengthMm(ModelDoc2 model, IFeature feature)
-        {
-            try
-            {
-                var sketch = feature.GetSpecificFeature2() as Sketch;
-                if (sketch == null)
-                    return null;
-
-                var segment = (SketchSegment)sketch.GetFirstSegment();
-                double total = 0;
-                var found = false;
-
-                while (segment != null)
-                {
-                    if (segment.GetLength() > 0)
-                    {
-                        total += segment.GetLength();
-                        found = true;
-                    }
-                    segment = (SketchSegment)segment.GetNext();
-                }
-
-                // API の GetLength はメートル単位
-                return found ? total * 1000.0 : (double?)null;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static IFeature FindFeatureByType(ModelDoc2 model, string typeName)
-        {
-            var feature = (IFeature)model.FirstFeature();
-            while (feature != null)
-            {
-                if (string.Equals(feature.GetTypeName2(), typeName, StringComparison.Ordinal))
-                    return feature;
-                feature = (IFeature)feature.GetNextFeature();
-            }
-            return null;
-        }
-
-        private static double ToMm(double valueMeters) => valueMeters * 1000.0;
-
-        private static double Round(double value) =>
-            Math.Round(value, 4, MidpointRounding.AwayFromZero);
+    public sealed class ExportResult
+    {
+        public ExportResult(BendPackage package, string jsonPath, string dxfPath) { Package = package; JsonPath = jsonPath; DxfPath = dxfPath; }
+        public BendPackage Package { get; }
+        public string JsonPath { get; }
+        public string DxfPath { get; }
     }
 }

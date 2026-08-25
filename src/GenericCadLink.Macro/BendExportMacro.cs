@@ -1,14 +1,12 @@
 using System;
+using System.Text;
 using System.Windows.Forms;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
 namespace GenericCadLink.Macro
 {
-    /// <summary>
-    /// SolidWorks 2022 C# マクロのエントリポイント。
-    /// ツール > マクロ > 実行 から呼び出す。
-    /// </summary>
+    /// <summary>SolidWorks 2022 C# macro entry point.</summary>
     public partial class BendExportMacro
     {
         public SldWorks swApp;
@@ -17,70 +15,34 @@ namespace GenericCadLink.Macro
         {
             try
             {
-                var exporter = new BendExporter(swApp);
-                var package = exporter.ExportActiveDocument();
-                var model = (ModelDoc2)swApp.ActiveDoc;
-                var partPath = model?.GetPathName() ?? "";
-
-                string outputPath = null;
-                if (!string.IsNullOrWhiteSpace(partPath))
-                    outputPath = exporter.WriteBendJson(package, partPath);
-
-                ShowResult(package, outputPath);
+                ShowResult(new BendExporter(swApp).ExportActiveDocument());
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    "Generic CadLink: 予期しないエラー\n\n" + ex.Message,
-                    "Generic CadLink",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                MessageBox.Show("Generic CadLink: unexpected error\n\n" + ex.Message,
+                    "Generic CadLink", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        public int HookSwShutdown()
+        public int HookSwShutdown() { return 0; }
+        public swDocumentTypes_e GetDocumentType() { return swDocumentTypes_e.swDocPART; }
+
+        private static void ShowResult(ExportResult result)
         {
-            return 0;
-        }
+            var package = result.Package;
+            var lines = new StringBuilder();
+            if (!string.IsNullOrEmpty(result.JsonPath)) lines.AppendLine("JSON: " + result.JsonPath);
+            if (!string.IsNullOrEmpty(result.DxfPath)) lines.AppendLine("DXF: " + result.DxfPath);
+            lines.AppendLine("Part number: " + package.PartNumber);
+            lines.AppendLine("Bends: " + package.Bends.Count);
+            if (package.Thickness.HasValue) lines.AppendLine("Thickness: " + package.Thickness.Value + " mm");
+            if (!string.IsNullOrEmpty(package.Material)) lines.AppendLine("Material: " + package.Material);
+            foreach (var error in package.Errors) lines.AppendLine("[ERROR] " + error);
+            foreach (var warning in package.Warnings) lines.AppendLine("[WARN] " + warning);
 
-        public swDocumentTypes_e GetDocumentType()
-        {
-            return swDocumentTypes_e.swDocPART;
-        }
-
-        private static void ShowResult(Models.BendPackage package, string outputPath)
-        {
-            var lines = new System.Text.StringBuilder();
-
-            if (!string.IsNullOrEmpty(outputPath))
-                lines.AppendLine("出力: " + outputPath);
-
-            lines.AppendLine("品番: " + package.PartNumber);
-            lines.AppendLine("曲げ数: " + package.Bends.Count);
-
-            if (package.Thickness.HasValue)
-                lines.AppendLine("板厚: " + package.Thickness.Value + " mm");
-
-            if (!string.IsNullOrEmpty(package.Material))
-                lines.AppendLine("材質: " + package.Material);
-
-            foreach (var err in package.Errors)
-                lines.AppendLine("[ERROR] " + err);
-
-            foreach (var warn in package.Warnings)
-                lines.AppendLine("[WARN] " + warn);
-
-            var icon = package.Errors.Count > 0
-                ? MessageBoxIcon.Error
-                : package.Warnings.Count > 0
-                    ? MessageBoxIcon.Warning
-                    : MessageBoxIcon.Information;
-
-            MessageBox.Show(
-                lines.ToString(),
-                "Generic CadLink — bend.json",
-                MessageBoxButtons.OK,
-                icon);
+            var icon = package.Errors.Count > 0 ? MessageBoxIcon.Error
+                : package.Warnings.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
+            MessageBox.Show(lines.ToString(), "Generic CadLink schema v0.3", MessageBoxButtons.OK, icon);
         }
     }
 }
