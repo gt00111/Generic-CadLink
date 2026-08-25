@@ -52,9 +52,9 @@ namespace GenericCadLink.Macro
             var folded = new List<BendDraft>();
             for (var i = 0; i < candidates.Count; i++)
             {
-                var draft = CaptureFoldedBend(model, geometry, candidates[i], fixedFaceObject, frame, i + 1);
+                var draft = CreateBendDraft(model, candidates[i], i + 1);
                 folded.Add(draft);
-                if (draft.Error != null) package.Errors.Add("BEND_GEOMETRY_FAILED[" + draft.Id + "]: " + draft.Error);
+                if (draft.Error != null) package.Errors.Add("BEND_DEFINITION_FAILED[" + draft.Id + "]: " + draft.Error);
             }
 
             var wasSuppressed = flatPattern.IsSuppressed();
@@ -69,36 +69,12 @@ namespace GenericCadLink.Macro
                 foreach (var draft in folded)
                 {
                     if (draft.Error != null) continue;
-                    AxisInfo axis; string axisError;
-                    if (!geometry.TryReadFlatAxis(draft.FlatFeature, frame, out axis, out axisError))
+                    string axisError;
+                    if (!geometry.TryReadFlatAxis(draft.FlatFeature, frame, out draft.Axis, out axisError))
                     {
                         package.Errors.Add("BEND_AXIS_FAILED[" + draft.Id + "]: " + axisError);
-                        continue;
+                        draft.Error = axisError;
                     }
-                    string signError;
-                    var signedAngle = geometry.ComputeSignedAngle(axis, frame, draft.Folded.BentFaceNormalModel, draft.AngleDeg, out signError);
-                    if (signError != null)
-                    {
-                        package.Errors.Add("SIGNED_ANGLE_FAILED[" + draft.Id + "]: " + signError);
-                        continue;
-                    }
-                    var direction = signedAngle > 0 ? "up" : "down";
-                    var layer = signedAngle > 0 ? "BEND_UP" : "BEND_DOWN";
-                    package.Bends.Add(new BendInfo
-                    {
-                        Id = draft.Id,
-                        InnerRadius = Round(draft.InnerRadiusMm),
-                        AngleDeg = Round(draft.AngleDeg),
-                        SignedAngleDeg = Round(signedAngle),
-                        Direction = direction,
-                        Axis = axis,
-                        StationaryFaceId = draft.Folded.StationaryFaceId,
-                        MovingFaceId = draft.Folded.MovingFaceId,
-                        MovingSidePoint = geometry.CreateMovingSidePoint(axis, frame),
-                        DxfLayer = layer,
-                        LengthMm = Round(VectorMath.Length(VectorMath.Subtract(axis.End, axis.Start))),
-                        SwFeatureName = draft.Feature.Name ?? "",
-                    });
                 }
             }
             finally
@@ -109,6 +85,31 @@ namespace GenericCadLink.Macro
                     model.EditRebuild3();
                 }
                 model.ClearSelection2(true);
+            }
+
+            foreach (var draft in folded)
+            {
+                if (draft.Error != null || draft.Axis == null) continue;
+                draft.Folded = geometry.CaptureFoldedGeometry(draft.Feature, fixedFaceObject, frame, draft.Axis, draft.AngleDeg);
+                if (draft.Folded.Error != null)
+                {
+                    package.Errors.Add("BEND_GEOMETRY_FAILED[" + draft.Id + "]: " + draft.Folded.Error);
+                    continue;
+                }
+                string signError;
+                var signedAngle = geometry.ComputeSignedAngle(draft.Axis, frame, draft.Folded.BentFaceNormalModel, draft.AngleDeg, out signError);
+                if (signError != null) { package.Errors.Add("SIGNED_ANGLE_FAILED[" + draft.Id + "]: " + signError); continue; }
+                var direction = signedAngle > 0 ? "up" : "down";
+                var layer = signedAngle > 0 ? "BEND_UP" : "BEND_DOWN";
+                package.Bends.Add(new BendInfo
+                {
+                    Id = draft.Id, InnerRadius = Round(draft.InnerRadiusMm), AngleDeg = Round(draft.AngleDeg),
+                    SignedAngleDeg = Round(signedAngle), Direction = direction, Axis = draft.Axis,
+                    StationaryFaceId = draft.Folded.StationaryFaceId, MovingFaceId = draft.Folded.MovingFaceId,
+                    MovingSidePoint = geometry.CreateMovingSidePoint(draft.Axis, frame), DxfLayer = layer,
+                    LengthMm = Round(VectorMath.Length(VectorMath.Subtract(draft.Axis.End, draft.Axis.Start))),
+                    SwFeatureName = draft.Feature.Name ?? "",
+                });
             }
 
             var outputDir = ResolveOutputDirectory(path, package.PartNumber);
@@ -128,7 +129,7 @@ namespace GenericCadLink.Macro
             return new ExportResult(package, jsonPath, File.Exists(dxfPath) ? dxfPath : null);
         }
 
-        private BendDraft CaptureFoldedBend(ModelDoc2 model, SolidWorksGeometryExtractor geometry, BendCandidate candidate, Face2 fixedFace, CoordinateFrame frame, int index)
+        private BendDraft CreateBendDraft(ModelDoc2 model, BendCandidate candidate, int index)
         {
             var feature = candidate.FoldedFeature;
             var draft = new BendDraft { Id = "B" + index, Feature = feature, FlatFeature = candidate.FlatFeature };
@@ -156,8 +157,6 @@ namespace GenericCadLink.Macro
                 finally { sketchedBend.ReleaseSelectionAccess(); }
             }
             else { draft.Error = "BEND_DEFINITION_UNSUPPORTED: " + feature.GetTypeName2(); return draft; }
-            draft.Folded = geometry.CaptureFoldedGeometry(feature, fixedFace, frame, draft.AngleDeg);
-            draft.Error = draft.Folded.Error;
             return draft;
         }
 
@@ -274,7 +273,7 @@ namespace GenericCadLink.Macro
         private static double Round(double value) => Math.Round(value, 6, MidpointRounding.AwayFromZero);
 
         private sealed class BendCandidate { public IFeature FoldedFeature; public IFeature FlatFeature; }
-        private sealed class BendDraft { public string Id; public IFeature Feature; public IFeature FlatFeature; public double AngleDeg; public double InnerRadiusMm; public FoldedBendGeometry Folded; public string Error; }
+        private sealed class BendDraft { public string Id; public IFeature Feature; public IFeature FlatFeature; public double AngleDeg; public double InnerRadiusMm; public AxisInfo Axis; public FoldedBendGeometry Folded; public string Error; }
     }
 
     public sealed class ExportResult

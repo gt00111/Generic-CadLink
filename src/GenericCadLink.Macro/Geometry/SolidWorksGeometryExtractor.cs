@@ -60,7 +60,7 @@ namespace GenericCadLink.Macro.Geometry
             finally { data.ReleaseSelectionAccess(); }
         }
 
-        public FoldedBendGeometry CaptureFoldedGeometry(IFeature feature, Face2 fixedFace, CoordinateFrame frame, double angleDeg)
+        public FoldedBendGeometry CaptureFoldedGeometry(IFeature feature, Face2 fixedFace, CoordinateFrame frame, AxisInfo axis, double angleDeg)
         {
             var result = new FoldedBendGeometry();
             var faces = feature.GetFaces() as object[];
@@ -85,12 +85,15 @@ namespace GenericCadLink.Macro.Geometry
                         Area = face.GetArea(),
                         TopologyDistance = GetTopologicalDistance(fixedFace, face),
                         SharesCurvedBendFace = SharesCurvedNeighbor(fixedFace, face),
+                        AxisDistanceMm = VectorMath.DistancePointToLine(frame.PointToExport(ReadFacePoint(face)), axis),
                     });
             }
 
             candidates.RemoveAll(x => x.TopologyDistance < 0);
             candidates.Sort((a, b) =>
             {
+                var byAxisDistance = a.AxisDistanceMm.CompareTo(b.AxisDistanceMm);
+                if (Math.Abs(a.AxisDistanceMm - b.AxisDistanceMm) > 0.05) return byAxisDistance;
                 var byCurvedConnection = b.SharesCurvedBendFace.CompareTo(a.SharesCurvedBendFace);
                 if (byCurvedConnection != 0) return byCurvedConnection;
                 var byDistance = a.TopologyDistance.CompareTo(b.TopologyDistance);
@@ -100,7 +103,8 @@ namespace GenericCadLink.Macro.Geometry
                 return string.CompareOrdinal(GetPersistentId(a.Face), GetPersistentId(b.Face));
             });
             if (candidates.Count == 0) { result.Error = "MOVING_FACE_NOT_FOUND"; return result; }
-            if (candidates.Count > 1 && candidates[0].SharesCurvedBendFace == candidates[1].SharesCurvedBendFace &&
+            if (candidates.Count > 1 && Math.Abs(candidates[0].AxisDistanceMm - candidates[1].AxisDistanceMm) <= 0.05 &&
+                candidates[0].SharesCurvedBendFace == candidates[1].SharesCurvedBendFace &&
                 candidates[0].TopologyDistance == candidates[1].TopologyDistance &&
                 Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12 &&
                 VectorMath.Dot(candidates[0].Normal, candidates[1].Normal) < 1.0 - 1e-6)
@@ -122,6 +126,7 @@ namespace GenericCadLink.Macro.Geometry
                 ", point=" + FormatVector(candidate.Point) +
                 ", distance=" + candidate.TopologyDistance.ToString(CultureInfo.InvariantCulture) +
                 ", area=" + candidate.Area.ToString("0.#########", CultureInfo.InvariantCulture) +
+                ", axisDistanceMm=" + candidate.AxisDistanceMm.ToString("0.######", CultureInfo.InvariantCulture) +
                 ", curved=" + candidate.SharesCurvedBendFace.ToString().ToLowerInvariant() + "}";
         }
 
@@ -308,7 +313,7 @@ namespace GenericCadLink.Macro.Geometry
         private static Vector3Info ReadSketchPoint(object pointObject) { var p = pointObject as SketchPoint; return p == null ? null : new Vector3Info(p.X, p.Y, p.Z); }
         private static Vector3Info ReadVector(object value) { var p = value as double[]; return p == null || p.Length < 3 ? null : new Vector3Info(p[0], p[1], p[2]); }
 
-        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public int TopologyDistance; public bool SharesCurvedBendFace; }
+        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public double AxisDistanceMm; public int TopologyDistance; public bool SharesCurvedBendFace; }
         private sealed class FaceDistance { public Face2 Face; public int Distance; }
     }
 
