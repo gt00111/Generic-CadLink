@@ -110,6 +110,13 @@ namespace GenericCadLink.Macro
                     package.Errors.Add("BEND_GEOMETRY_FAILED[" + draft.Id + "]: " + draft.Folded.Error);
                     continue;
                 }
+                var movingSidePoint = geometry.CreateMovingSidePoint(draft.Axis, frame);
+                if (!geometry.OrientAxisToMovingSide(draft.Axis, movingSidePoint))
+                {
+                    package.Errors.Add("BEND_AXIS_ORIENTATION_FAILED[" + draft.Id + "]: moving side is unresolved.");
+                    continue;
+                }
+                movingSidePoint = geometry.CreateMovingSidePoint(draft.Axis, frame);
                 string signError;
                 var signedAngle = geometry.ComputeSignedAngle(draft.Axis, frame, draft.Folded.BentFaceNormalModel, draft.AngleDeg, out signError);
                 if (signError != null) { package.Errors.Add("SIGNED_ANGLE_FAILED[" + draft.Id + "]: " + signError); continue; }
@@ -120,7 +127,7 @@ namespace GenericCadLink.Macro
                     Id = draft.Id, InnerRadius = Round(draft.InnerRadiusMm), AngleDeg = Round(draft.AngleDeg),
                     SignedAngleDeg = Round(signedAngle), Direction = direction, Axis = draft.Axis,
                     StationaryFaceId = draft.Folded.StationaryFaceId, MovingFaceId = draft.Folded.MovingFaceId,
-                    MovingSidePoint = geometry.CreateMovingSidePoint(draft.Axis, frame), DxfLayer = layer,
+                    MovingSidePoint = movingSidePoint, DxfLayer = layer,
                     LengthMm = Round(VectorMath.Length(VectorMath.Subtract(draft.Axis.End, draft.Axis.Start))),
                     SwFeatureName = draft.Feature.Name ?? "",
                 });

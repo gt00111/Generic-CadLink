@@ -301,6 +301,25 @@ namespace GenericCadLink.Macro.Geometry
             return Math.Sign(triple) * Math.Abs(angleDeg);
         }
 
+        public bool OrientAxisToMovingSide(AxisInfo axis, Vector3Info movingSidePoint)
+        {
+            if (axis == null || movingSidePoint == null) return false;
+            var midpoint = VectorMath.Scale(VectorMath.Add(axis.Start, axis.End), 0.5);
+            var movingVector = VectorMath.Subtract(movingSidePoint, midpoint);
+            var sideSign = VectorMath.Dot(new Vector3Info(0, 0, 1), VectorMath.Cross(axis.Direction, movingVector));
+            if (!VectorMath.IsFinite(sideSign) || Math.Abs(sideSign) <= VectorMath.GeometryToleranceMm) return false;
+
+            // Canonical convention: when viewed from +flatNormal, the moving side is
+            // always to the right of axisStart -> axisEnd. This makes equal physical
+            // bends on opposite edges carry the same signed angle.
+            if (sideSign > 0)
+            {
+                var swap = axis.Start; axis.Start = axis.End; axis.End = swap;
+                axis.Direction = VectorMath.Scale(axis.Direction, -1);
+            }
+            return true;
+        }
+
         public Vector3Info CreateMovingSidePoint(AxisInfo axis, CoordinateFrame frame)
         {
             var fixedPoint = frame.PointToExport(frame.FixedFacePointModel);
