@@ -43,6 +43,7 @@
   <ItemGroup>
     <Compile Include="BendExportMacro.cs" />
     <Compile Include="BendExporter.cs" />
+    <Compile Include="ExporterHost.cs" />
     <Compile Include="Dxf\DxfBendLineMatcher.cs" />
     <Compile Include="Geometry\VectorMath.cs" />
     <Compile Include="Geometry\CoordinateFrame.cs" />

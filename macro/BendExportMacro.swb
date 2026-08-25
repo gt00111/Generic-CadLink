@@ -1,12 +1,10 @@
 ' Generic CadLink schema v0.3 launcher
 ' Run: Tools > Macro > Run > BendExportMacro.swb
-' The v0.3 implementation is kept in the sibling BendExportMacro.dll so that
-' SWB and direct DLL execution always use exactly the same geometry rules.
+' The v0.3 implementation is kept in the sibling BendExportMacro.exe.
 
 Option Explicit
 
-Private Const SW_RUN_MACRO_DEFAULT As Long = 0
-Private Const V03_DLL_NAME As String = "BendExportMacro.dll"
+Private Const V03_HOST_NAME As String = "BendExportMacro.exe"
 
 Dim swApp As Object
 
@@ -21,35 +19,23 @@ Sub main()
         Exit Sub
     End If
 
-    Dim dllPath As String
-    dllPath = macroFolder & V03_DLL_NAME
-    If Dir(dllPath) = "" Then
-        MsgBox "V03_DLL_MISSING: The schema v0.3 DLL was not found." & vbCrLf & vbCrLf & _
-            dllPath & vbCrLf & vbCrLf & _
-            "Run scripts\build-macro.ps1 and keep the DLL beside this SWB file.", _
+    Dim hostPath As String
+    hostPath = macroFolder & V03_HOST_NAME
+    If Dir(hostPath) = "" Then
+        MsgBox "V03_HOST_MISSING: The schema v0.3 host was not found." & vbCrLf & vbCrLf & _
+            hostPath & vbCrLf & vbCrLf & _
+            "Run scripts\build-macro.ps1 and keep the EXE beside this SWB file.", _
             vbCritical, "Generic CadLink schema v0.3"
         Exit Sub
     End If
 
-    Dim runError As Long
-    Dim succeeded As Boolean
-    On Error Resume Next
-    succeeded = swApp.RunMacro2(dllPath, "", "Main", SW_RUN_MACRO_DEFAULT, runError)
-    Dim callError As Long
-    Dim callDescription As String
-    callError = Err.Number
-    callDescription = Err.Description
-    Err.Clear
-    On Error GoTo 0
-
-    If Not succeeded Then
-        Dim message As String
-        message = "V03_DLL_RUN_FAILED: SolidWorks could not run BendExportMacro.dll." & vbCrLf & _
-            "RunMacro2 error: " & CStr(runError)
-        If callError <> 0 Then
-            message = message & vbCrLf & "VBA error: " & CStr(callError) & " - " & callDescription
-        End If
-        MsgBox message, vbCritical, "Generic CadLink schema v0.3"
+    Dim shell As Object
+    Set shell = CreateObject("WScript.Shell")
+    Dim exitCode As Long
+    exitCode = shell.Run("""" & hostPath & """", 0, True)
+    If exitCode = 1 Then
+        MsgBox "V03_HOST_FAILED: BendExportMacro.exe could not complete.", _
+            vbCritical, "Generic CadLink schema v0.3"
     End If
 End Sub
 

@@ -1,9 +1,9 @@
 # Generic CadLink
 
 > Schema v0.3 deterministic M-BEND export is implemented in the C# exporter.
-> Build `macro/BendExportMacro.dll` with `scripts/build-macro.ps1`.
+> Build `macro/BendExportMacro.exe` with `scripts/build-macro.ps1`.
 > Implementation and verification details: [docs/schema-v0.3-implementation.md](docs/schema-v0.3-implementation.md).
-> `macro/BendExportMacro.swb` is the supported launcher for that DLL; keep both files in the same folder.
+> `macro/BendExportMacro.swb` is the supported launcher for that host; keep both files in the same folder.
 
 SolidWorks 2022 板金パーツから portal（板金製造支援）向けに `bend.json` を出力する自作 CADLink。
 

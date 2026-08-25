@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $libDir = Join-Path $projectRoot "lib"
-$outputPath = Join-Path $projectRoot "macro\BendExportMacro.dll"
+$outputPath = Join-Path $projectRoot "macro\BendExportMacro.exe"
 $sourceDir = Join-Path $projectRoot "src\GenericCadLink.Macro"
 
 if (-not (Test-Path -LiteralPath (Join-Path $libDir "SolidWorks.Interop.sldworks.dll"))) {
@@ -33,7 +33,7 @@ foreach ($reference in $references) {
 }
 
 $arguments = @(
-    $compiler, "/nologo", "/target:library", "/platform:x64", "/langversion:latest", "/nostdlib+",
+    $compiler, "/nologo", "/target:winexe", "/main:GenericCadLink.Macro.ExporterHost", "/platform:x64", "/langversion:latest", "/nostdlib+",
     "/out:$outputPath"
 )
 $arguments += $references | ForEach-Object { "/reference:$_" }

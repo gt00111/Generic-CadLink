@@ -4,10 +4,10 @@ using System.Windows.Forms;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
-namespace GenericCadLink.Macro
+namespace BendExportMacro
 {
     /// <summary>SolidWorks 2022 C# macro entry point.</summary>
-    public partial class BendExportMacro
+    public partial class Macro
     {
         public SldWorks swApp;
 
@@ -15,7 +15,7 @@ namespace GenericCadLink.Macro
         {
             try
             {
-                ShowResult(new BendExporter(swApp).ExportActiveDocument());
+                ShowResult(new GenericCadLink.Macro.BendExporter(swApp).ExportActiveDocument());
             }
             catch (Exception ex)
             {
@@ -27,7 +27,7 @@ namespace GenericCadLink.Macro
         public int HookSwShutdown() { return 0; }
         public swDocumentTypes_e GetDocumentType() { return swDocumentTypes_e.swDocPART; }
 
-        private static void ShowResult(ExportResult result)
+        private static void ShowResult(GenericCadLink.Macro.ExportResult result)
         {
             var package = result.Package;
             var lines = new StringBuilder();
