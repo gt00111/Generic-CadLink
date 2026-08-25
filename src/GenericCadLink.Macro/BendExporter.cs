@@ -46,10 +46,9 @@ namespace GenericCadLink.Macro
             package.CoordinateSystem = frame.ToInfo();
             package.FixedFace = fixedFace;
 
-            bool usingFlatPatternBends;
-            var candidates = CollectOneBends(model, out usingFlatPatternBends);
-            if (usingFlatPatternBends)
-                package.Warnings.Add("BEND_DISCOVERY_FALLBACK: using OneBend features below FlatPattern.");
+            string discoveryError;
+            var candidates = CollectBendCandidates(model, out discoveryError);
+            if (discoveryError != null) package.Errors.Add(discoveryError);
             var folded = new List<BendDraft>();
             for (var i = 0; i < candidates.Count; i++)
             {
@@ -71,7 +70,7 @@ namespace GenericCadLink.Macro
                 {
                     if (draft.Error != null) continue;
                     AxisInfo axis; string axisError;
-                    if (!geometry.TryReadFlatAxis(draft.Feature, frame, out axis, out axisError))
+                    if (!geometry.TryReadFlatAxis(draft.FlatFeature, frame, out axis, out axisError))
                     {
                         package.Errors.Add("BEND_AXIS_FAILED[" + draft.Id + "]: " + axisError);
                         continue;
@@ -129,51 +128,79 @@ namespace GenericCadLink.Macro
             return new ExportResult(package, jsonPath, File.Exists(dxfPath) ? dxfPath : null);
         }
 
-        private BendDraft CaptureFoldedBend(ModelDoc2 model, SolidWorksGeometryExtractor geometry, IFeature feature, Face2 fixedFace, CoordinateFrame frame, int index)
+        private BendDraft CaptureFoldedBend(ModelDoc2 model, SolidWorksGeometryExtractor geometry, BendCandidate candidate, Face2 fixedFace, CoordinateFrame frame, int index)
         {
-            var draft = new BendDraft { Id = "B" + index, Feature = feature };
-            var data = feature.GetDefinition() as IOneBendFeatureData;
-            if (data == null) { draft.Error = "ONE_BEND_DEFINITION_MISSING"; return draft; }
-            data.AccessSelections(model, null);
-            try
+            var feature = candidate.FoldedFeature;
+            var draft = new BendDraft { Id = "B" + index, Feature = feature, FlatFeature = candidate.FlatFeature };
+            var definition = feature.GetDefinition();
+            var oneBend = definition as IOneBendFeatureData;
+            var sketchedBend = definition as ISketchedBendFeatureData;
+            if (oneBend != null)
             {
-                draft.AngleDeg = Math.Abs(data.BendAngle * RadToDeg);
-                draft.InnerRadiusMm = data.BendRadius * 1000.0;
+                oneBend.AccessSelections(model, null);
+                try
+                {
+                    draft.AngleDeg = Math.Abs(oneBend.BendAngle * RadToDeg);
+                    draft.InnerRadiusMm = oneBend.BendRadius * 1000.0;
+                }
+                finally { oneBend.ReleaseSelectionAccess(); }
             }
-            finally { data.ReleaseSelectionAccess(); }
+            else if (sketchedBend != null)
+            {
+                sketchedBend.AccessSelections(model, null);
+                try
+                {
+                    draft.AngleDeg = Math.Abs(sketchedBend.BendAngle * RadToDeg);
+                    draft.InnerRadiusMm = sketchedBend.BendRadius * 1000.0;
+                }
+                finally { sketchedBend.ReleaseSelectionAccess(); }
+            }
+            else { draft.Error = "BEND_DEFINITION_UNSUPPORTED: " + feature.GetTypeName2(); return draft; }
             draft.Folded = geometry.CaptureFoldedGeometry(feature, fixedFace, frame, draft.AngleDeg);
             draft.Error = draft.Folded.Error;
             return draft;
         }
 
-        private static List<IFeature> CollectOneBends(ModelDoc2 model, out bool usingFlatPatternBends)
+        private static List<BendCandidate> CollectBendCandidates(ModelDoc2 model, out string error)
         {
             var folded = new List<IFeature>();
             var flatPattern = new List<IFeature>();
             var feature = (IFeature)model.FirstFeature();
             while (feature != null)
             {
-                CollectOneBends(feature, false, folded, flatPattern);
+                CollectBendFeatures(feature, false, folded, flatPattern);
                 feature = (IFeature)feature.GetNextFeature();
             }
-            usingFlatPatternBends = folded.Count == 0 && flatPattern.Count > 0;
-            return usingFlatPatternBends ? flatPattern : folded;
+            error = null;
+            var result = new List<BendCandidate>();
+            if (folded.Count == 0 && flatPattern.Count == 0) return result;
+            if (folded.Count != flatPattern.Count)
+            {
+                error = "BEND_DISCOVERY_COUNT_MISMATCH: folded=" + folded.Count + ", flatPattern=" + flatPattern.Count + ".";
+                return result;
+            }
+            for (var i = 0; i < folded.Count; i++)
+                result.Add(new BendCandidate { FoldedFeature = folded[i], FlatFeature = flatPattern[i] });
+            return result;
         }
 
-        private static void CollectOneBends(IFeature feature, bool underFlatPattern,
+        private static void CollectBendFeatures(IFeature feature, bool underFlatPattern,
             List<IFeature> folded, List<IFeature> flatPattern)
         {
             var type = feature.GetTypeName2();
             var inFlat = underFlatPattern || type == "FlatPattern";
-            if (type == "OneBend")
+            if (inFlat && (type == "OneBend" || type == "UiBend"))
             {
-                var target = inFlat ? flatPattern : folded;
-                if (!ContainsFeature(target, feature)) target.Add(feature);
+                if (!ContainsFeature(flatPattern, feature)) flatPattern.Add(feature);
+            }
+            else if (!inFlat && (type == "OneBend" || type == "SketchBend" || type == "SM3dBend" || type == "EdgeFlange" || type == "MiterFlange"))
+            {
+                if (!ContainsFeature(folded, feature)) folded.Add(feature);
             }
             var child = (IFeature)feature.GetFirstSubFeature();
             while (child != null)
             {
-                CollectOneBends(child, inFlat, folded, flatPattern);
+                CollectBendFeatures(child, inFlat, folded, flatPattern);
                 child = (IFeature)child.GetNextSubFeature();
             }
         }
@@ -246,7 +273,8 @@ namespace GenericCadLink.Macro
         private static IFeature FindFeatureByType(ModelDoc2 model, string type) { var f = (IFeature)model.FirstFeature(); while (f != null) { if (f.GetTypeName2() == type) return f; f = (IFeature)f.GetNextFeature(); } return null; }
         private static double Round(double value) => Math.Round(value, 6, MidpointRounding.AwayFromZero);
 
-        private sealed class BendDraft { public string Id; public IFeature Feature; public double AngleDeg; public double InnerRadiusMm; public FoldedBendGeometry Folded; public string Error; }
+        private sealed class BendCandidate { public IFeature FoldedFeature; public IFeature FlatFeature; }
+        private sealed class BendDraft { public string Id; public IFeature Feature; public IFeature FlatFeature; public double AngleDeg; public double InnerRadiusMm; public FoldedBendGeometry Folded; public string Error; }
     }
 
     public sealed class ExportResult
