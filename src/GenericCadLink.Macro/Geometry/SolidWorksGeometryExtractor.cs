@@ -65,12 +65,11 @@ namespace GenericCadLink.Macro.Geometry
             var faces = feature.GetFaces() as object[];
             if (faces == null) { result.Error = "FEATURE_FACES_MISSING"; return result; }
 
-            var reachable = GetTangentReachableFaces(fixedFace);
             var candidates = new List<FaceCandidate>();
             foreach (var item in faces)
             {
                 var face = item as Face2;
-                if (face == null || !reachable.Contains(GetPersistentId(face))) continue;
+                if (face == null) continue;
                 var normal = VectorMath.Normalize(ReadVector(face.Normal));
                 if (normal == null) continue;
                 var dot = Math.Max(-1.0, Math.Min(1.0, VectorMath.Dot(frame.NormalModel, normal)));
@@ -157,52 +156,6 @@ namespace GenericCadLink.Macro.Geometry
             catch { return null; }
         }
 
-        private HashSet<string> GetTangentReachableFaces(Face2 start)
-        {
-            var visited = new HashSet<string>();
-            var queue = new Queue<Face2>(); queue.Enqueue(start);
-            while (queue.Count > 0)
-            {
-                var face = queue.Dequeue(); var id = GetPersistentId(face);
-                if (id == null || !visited.Add(id)) continue;
-                var edges = face.GetEdges() as object[]; if (edges == null) continue;
-                foreach (var item in edges)
-                {
-                    var edge = item as Edge; if (edge == null) continue;
-                    var adjacent = edge.GetTwoAdjacentFaces2() as object[]; if (adjacent == null) continue;
-                    foreach (var otherItem in adjacent)
-                    {
-                        var other = otherItem as Face2;
-                        if (other != null && AreTangentAcrossEdge(face, other, edge)) queue.Enqueue(other);
-                    }
-                }
-            }
-            return visited;
-        }
-
-        private static bool AreTangentAcrossEdge(Face2 a, Face2 b, Edge edge)
-        {
-            try
-            {
-                var p = ReadEdgeMidpoint(edge);
-                var na = ReadFaceNormalAt(a, p); var nb = ReadFaceNormalAt(b, p);
-                return na != null && nb != null && Math.Abs(VectorMath.Dot(na, nb)) >= 1.0 - 1e-5;
-            }
-            catch { return false; }
-        }
-
-        private static Vector3Info ReadFaceNormalAt(Face2 face, Vector3Info p)
-        {
-            var uv = face.ReverseEvaluate(p.X, p.Y, p.Z) as double[];
-            var surface = face.GetSurface() as Surface;
-            if (uv == null || uv.Length < 2 || surface == null) return null;
-            var eval = surface.Evaluate(uv[0], uv[1], 0, 0) as double[];
-            if (eval == null || eval.Length < 6) return null;
-            var normal = new Vector3Info(eval[eval.Length - 3], eval[eval.Length - 2], eval[eval.Length - 1]);
-            if (face.FaceInSurfaceSense()) normal = VectorMath.Scale(normal, -1);
-            return VectorMath.Normalize(normal);
-        }
-
         private static Vector3Info ReadFacePoint(Face2 face)
         {
             var uv = face.GetUVBounds() as double[]; var surface = face.GetSurface() as Surface;
@@ -233,12 +186,6 @@ namespace GenericCadLink.Macro.Geometry
         {
             var seed = Math.Abs(normal.X) < 0.9 ? new Vector3Info(1, 0, 0) : new Vector3Info(0, 1, 0);
             return VectorMath.Normalize(VectorMath.Cross(seed, normal));
-        }
-        private static Vector3Info ReadEdgeMidpoint(Edge edge)
-        {
-            var curve = edge.GetCurve() as Curve; var p = edge.GetCurveParams2() as double[];
-            var value = curve?.Evaluate((p[6] + p[7]) * 0.5) as double[];
-            return value == null ? null : new Vector3Info(value[0], value[1], value[2]);
         }
         private static Vector3Info ReadSketchPoint(object pointObject) { var p = pointObject as SketchPoint; return p == null ? null : new Vector3Info(p.X, p.Y, p.Z); }
         private static Vector3Info ReadVector(object value) { var p = value as double[]; return p == null || p.Length < 3 ? null : new Vector3Info(p[0], p[1], p[2]); }
