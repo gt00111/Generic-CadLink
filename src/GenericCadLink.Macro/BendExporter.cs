@@ -57,6 +57,13 @@ namespace GenericCadLink.Macro
                 if (draft.Error != null) package.Errors.Add("BEND_DEFINITION_FAILED[" + draft.Id + "]: " + draft.Error);
             }
 
+            var outputDir = ResolveOutputDirectory(path, package.PartNumber);
+            Directory.CreateDirectory(outputDir);
+            var dxfPath = Path.Combine(outputDir, "flat.dxf");
+            var dxfExported = ExportDxf(part, path, dxfPath, frame);
+            if (!dxfExported) package.Errors.Add("DXF_EXPORT_FAILED: SolidWorks ExportToDWG2 returned false.");
+            var rawDxfAxes = dxfExported ? DxfBendLineMatcher.ReadRawBendAxes(dxfPath) : new List<AxisInfo>();
+
             var wasSuppressed = flatPattern.IsSuppressed();
             try
             {
@@ -66,14 +73,21 @@ namespace GenericCadLink.Macro
                     model.EditRebuild3();
                 }
 
-                foreach (var draft in folded)
+                for (var draftIndex = 0; draftIndex < folded.Count; draftIndex++)
                 {
+                    var draft = folded[draftIndex];
                     if (draft.Error != null) continue;
                     string axisError;
                     if (!geometry.TryReadFlatAxis(draft.FlatFeature, frame, out draft.Axis, out axisError))
                     {
-                        package.Errors.Add("BEND_AXIS_FAILED[" + draft.Id + "]: " + axisError);
-                        draft.Error = axisError;
+                        if (rawDxfAxes.Count == folded.Count)
+                            draft.Axis = rawDxfAxes[draftIndex];
+                        else
+                        {
+                            package.Errors.Add("BEND_AXIS_FAILED[" + draft.Id + "]: " + axisError +
+                                "; DXF bend axes=" + rawDxfAxes.Count + ", expected=" + folded.Count + ".");
+                            draft.Error = axisError;
+                        }
                     }
                 }
             }
@@ -112,12 +126,7 @@ namespace GenericCadLink.Macro
                 });
             }
 
-            var outputDir = ResolveOutputDirectory(path, package.PartNumber);
-            Directory.CreateDirectory(outputDir);
-            var dxfPath = Path.Combine(outputDir, "flat.dxf");
-            if (!ExportDxf(part, path, dxfPath, frame))
-                package.Errors.Add("DXF_EXPORT_FAILED: SolidWorks ExportToDWG2 returned false.");
-            else
+            if (dxfExported)
             {
                 try { DxfBendLineMatcher.MatchAndRewrite(dxfPath, package.Bends, package.Errors); }
                 catch (Exception ex) { package.Errors.Add("DXF_POSTPROCESS_FAILED: " + ex.Message); }

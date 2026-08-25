@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using GenericCadLink.Macro.Geometry;
 using GenericCadLink.Macro.Models;
 
 namespace GenericCadLink.Macro.Dxf
@@ -43,6 +44,25 @@ namespace GenericCadLink.Macro.Dxf
             document.EnsureLayer("BEND_UP", 1);
             document.EnsureLayer("BEND_DOWN", 5);
             document.Write(path);
+        }
+
+        public static List<AxisInfo> ReadRawBendAxes(string path)
+        {
+            var result = new List<AxisInfo>();
+            var document = DxfDocument.Read(path);
+            foreach (var line in document.Lines)
+            {
+                var lineType = (line.LineType ?? "").ToUpperInvariant();
+                var layer = (line.Layer ?? "").ToUpperInvariant();
+                if (lineType != "CENTER" && lineType != "PHANTOM" &&
+                    layer != "BEND_UP" && layer != "BEND_DOWN") continue;
+                var start = new Vector3Info(line.X1, line.Y1, 0);
+                var end = new Vector3Info(line.X2, line.Y2, 0);
+                VectorMath.OrderAxisEndpoints(ref start, ref end);
+                var direction = VectorMath.Normalize(VectorMath.Subtract(end, start));
+                if (direction != null) result.Add(new AxisInfo { Start = start, End = end, Direction = direction });
+            }
+            return result;
         }
 
         private static int FindBest(IList<DxfLine> lines, AxisInfo axis, ISet<int> used)
@@ -88,6 +108,7 @@ namespace GenericCadLink.Macro.Dxf
                         var code = d.Raw[j].Trim(); if (code == "0") { line.EntityEnd = j; break; }
                         var value = d.Raw[j + 1].Trim();
                         if (code == "5") line.Handle = value;
+                        else if (code == "6") line.LineType = value;
                         else if (code == "8")
                         {
                             d._entityLayerValueIndexes.Add(j + 1);
@@ -142,7 +163,7 @@ namespace GenericCadLink.Macro.Dxf
         private sealed class DxfLine
         {
             public int EntityStart, EntityEnd, LayerValueIndex = -1;
-            public string Handle, Layer;
+            public string Handle, Layer, LineType;
             public double X1, Y1, X2, Y2;
         }
     }
