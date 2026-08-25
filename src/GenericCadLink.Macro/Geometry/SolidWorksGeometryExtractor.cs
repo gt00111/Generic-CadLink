@@ -76,12 +76,25 @@ namespace GenericCadLink.Macro.Geometry
                 var measured = Math.Acos(dot) * 180.0 / Math.PI;
                 var error = Math.Min(Math.Abs(measured - angleDeg), Math.Abs((360.0 - measured) - angleDeg));
                 if (error <= 1.0)
-                    candidates.Add(new FaceCandidate { Face = face, Normal = normal, Point = ReadFacePoint(face), Area = face.GetArea() });
+                    candidates.Add(new FaceCandidate
+                    {
+                        Face = face,
+                        Normal = normal,
+                        Point = ReadFacePoint(face),
+                        Area = face.GetArea(),
+                        TopologyDistance = GetTopologicalDistance(fixedFace, face),
+                    });
             }
 
-            candidates.Sort((a, b) => b.Area.CompareTo(a.Area));
+            candidates.RemoveAll(x => x.TopologyDistance < 0);
+            candidates.Sort((a, b) =>
+            {
+                var byDistance = a.TopologyDistance.CompareTo(b.TopologyDistance);
+                return byDistance != 0 ? byDistance : b.Area.CompareTo(a.Area);
+            });
             if (candidates.Count == 0) { result.Error = "MOVING_FACE_NOT_FOUND"; return result; }
-            if (candidates.Count > 1 && Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12)
+            if (candidates.Count > 1 && candidates[0].TopologyDistance == candidates[1].TopologyDistance &&
+                Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12)
             {
                 result.Error = "MOVING_FACE_AMBIGUOUS";
                 return result;
@@ -91,6 +104,40 @@ namespace GenericCadLink.Macro.Geometry
             result.MovingFaceId = GetPersistentId(candidates[0].Face);
             result.StationaryFaceId = GetPersistentId(fixedFace);
             return result;
+        }
+
+        private int GetTopologicalDistance(Face2 start, Face2 target)
+        {
+            var targetId = GetPersistentId(target);
+            if (targetId == null) return -1;
+            var visited = new HashSet<string>();
+            var queue = new Queue<FaceDistance>();
+            queue.Enqueue(new FaceDistance { Face = start, Distance = 0 });
+
+            while (queue.Count > 0 && visited.Count < 10000)
+            {
+                var current = queue.Dequeue();
+                var currentId = GetPersistentId(current.Face);
+                if (currentId == null || !visited.Add(currentId)) continue;
+                if (currentId == targetId) return current.Distance;
+
+                var edges = current.Face.GetEdges() as object[];
+                if (edges == null) continue;
+                foreach (var edgeObject in edges)
+                {
+                    var edge = edgeObject as Edge;
+                    if (edge == null) continue;
+                    var adjacent = edge.GetTwoAdjacentFaces2() as object[];
+                    if (adjacent == null) continue;
+                    foreach (var faceObject in adjacent)
+                    {
+                        var face = faceObject as Face2;
+                        if (face != null)
+                            queue.Enqueue(new FaceDistance { Face = face, Distance = current.Distance + 1 });
+                    }
+                }
+            }
+            return -1;
         }
 
         public bool TryReadFlatAxis(IFeature feature, CoordinateFrame frame, out AxisInfo axis, out string error)
@@ -190,7 +237,8 @@ namespace GenericCadLink.Macro.Geometry
         private static Vector3Info ReadSketchPoint(object pointObject) { var p = pointObject as SketchPoint; return p == null ? null : new Vector3Info(p.X, p.Y, p.Z); }
         private static Vector3Info ReadVector(object value) { var p = value as double[]; return p == null || p.Length < 3 ? null : new Vector3Info(p[0], p[1], p[2]); }
 
-        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; }
+        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public int TopologyDistance; }
+        private sealed class FaceDistance { public Face2 Face; public int Distance; }
     }
 
     internal sealed class FoldedBendGeometry
