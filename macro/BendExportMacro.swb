@@ -9,10 +9,13 @@ Private Const V03_HOST_NAME As String = "BendExportMacro.exe"
 Dim swApp As Object
 
 Sub main()
+    WriteLauncherLog "SWB main started"
     If Not ConnectSwApp() Then Exit Sub
+    WriteLauncherLog "Connected to SolidWorks"
 
     Dim macroFolder As String
     macroFolder = GetThisMacroFolder()
+    WriteLauncherLog "Macro folder: " & macroFolder
     If Len(macroFolder) = 0 Then
         MsgBox "V03_LAUNCH_FAILED: Could not resolve the SWB folder.", _
             vbCritical, "Generic CadLink schema v0.3"
@@ -21,22 +24,47 @@ Sub main()
 
     Dim hostPath As String
     hostPath = macroFolder & V03_HOST_NAME
+    WriteLauncherLog "Host path: " & hostPath
     If Dir(hostPath) = "" Then
         MsgBox "V03_HOST_MISSING: The schema v0.3 host was not found." & vbCrLf & vbCrLf & _
             hostPath & vbCrLf & vbCrLf & _
-            "Run scripts\build-macro.ps1 and keep the EXE beside this SWB file.", _
+            "Run scripts\build-macro.ps1 and keep the EXE and SolidWorks.Interop DLLs beside this SWB file.", _
             vbCritical, "Generic CadLink schema v0.3"
         Exit Sub
     End If
 
     Dim shell As Object
+    On Error GoTo LaunchFailed
     Set shell = CreateObject("WScript.Shell")
     Dim exitCode As Long
+    WriteLauncherLog "Starting host"
     exitCode = shell.Run("""" & hostPath & """", 0, True)
+    WriteLauncherLog "Host exit code: " & CStr(exitCode)
     If exitCode = 1 Then
         MsgBox "V03_HOST_FAILED: BendExportMacro.exe could not complete.", _
             vbCritical, "Generic CadLink schema v0.3"
     End If
+    Exit Sub
+
+LaunchFailed:
+    WriteLauncherLog "Launcher error " & CStr(Err.Number) & ": " & Err.Description
+    MsgBox "V03_LAUNCH_FAILED: " & CStr(Err.Number) & " - " & Err.Description, _
+        vbCritical, "Generic CadLink schema v0.3"
+End Sub
+
+Private Sub WriteLauncherLog(message As String)
+    On Error Resume Next
+    Dim shell As Object
+    Set shell = CreateObject("WScript.Shell")
+    Dim logPath As String
+    logPath = shell.ExpandEnvironmentStrings("%TEMP%\GenericCadLink-swb.log")
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim stream As Object
+    Set stream = fso.OpenTextFile(logPath, 8, True)
+    stream.WriteLine CStr(Now) & "  " & message
+    stream.Close
+    On Error GoTo 0
 End Sub
 
 Private Function ConnectSwApp() As Boolean

@@ -60,7 +60,8 @@ Run from the repository root:
 .\scripts\build-macro.ps1
 ```
 
-This creates `macro/BendExportMacro.exe`. Keep it beside `macro/BendExportMacro.swb`.
+This creates `macro/BendExportMacro.exe` and copies the two SolidWorks Interop DLLs beside it.
+Keep the EXE, Interop DLLs, and `macro/BendExportMacro.swb` in the same folder.
 In SolidWorks 2022, open each representative saved sheet-metal part and run the SWB from
 **Tools > Macro > Run**. The SWB invokes the schema-v0.3 host and waits for completion.
 The export is accepted

@@ -42,4 +42,9 @@ $arguments += Get-ChildItem -LiteralPath $sourceDir -Recurse -Filter "*.cs" | Se
 Write-Host "Building $outputPath ..."
 & dotnet @arguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# The SWB launches this host out of process. Keep its SolidWorks interop
+# dependencies beside the EXE so the CLR can load ExporterHost.Main.
+Copy-Item -LiteralPath (Join-Path $libDir "SolidWorks.Interop.sldworks.dll") -Destination (Split-Path $outputPath -Parent) -Force
+Copy-Item -LiteralPath (Join-Path $libDir "SolidWorks.Interop.swconst.dll") -Destination (Split-Path $outputPath -Parent) -Force
 Write-Host "OK: $outputPath"

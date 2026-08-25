@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.IO;
 using System.Text;
 using System.Windows.Forms;
 using SolidWorks.Interop.sldworks;
@@ -11,21 +12,36 @@ namespace GenericCadLink.Macro
         [STAThread]
         private static int Main()
         {
+            Log("Host started");
             try
             {
+                Log("Connecting to active SolidWorks");
                 var active = Marshal.GetActiveObject("SldWorks.Application");
                 var app = active as SldWorks;
                 if (app == null) throw new InvalidOperationException("Could not connect to the active SolidWorks session.");
+                Log("Connected; exporting active document");
                 var result = new BendExporter(app).ExportActiveDocument();
+                Log("Export finished; errors=" + result.Package.Errors.Count);
                 ShowResult(result);
                 return result.Package.Errors.Count == 0 ? 0 : 2;
             }
             catch (Exception ex)
             {
+                Log("ERROR: " + ex);
                 MessageBox.Show("Generic CadLink v0.3 failed.\n\n" + ex.Message,
                     "Generic CadLink schema v0.3", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
+        }
+
+        private static void Log(string message)
+        {
+            try
+            {
+                File.AppendAllText(Path.Combine(Path.GetTempPath(), "GenericCadLink-v03-host.log"),
+                    DateTime.Now.ToString("o") + "  " + message + System.Environment.NewLine);
+            }
+            catch { }
         }
 
         private static void ShowResult(ExportResult result)
