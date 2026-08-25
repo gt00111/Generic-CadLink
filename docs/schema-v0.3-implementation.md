@@ -1,8 +1,8 @@
 # Schema v0.3 implementation
 
 The C# exporter under `src/GenericCadLink.Macro` is the authoritative schema-v0.3 exporter.
-The legacy `macro/BendExportMacro.swb` remains the validated v0.2.1 fallback and does not
-provide deterministic M-BEND geometry.
+`macro/BendExportMacro.swb` is a thin launcher that runs the sibling
+`macro/BendExportMacro.dll`, so SWB and direct DLL execution use the same implementation.
 
 ## Output contract
 
@@ -59,7 +59,9 @@ Run from the repository root:
 .\scripts\build-macro.ps1
 ```
 
-This creates `macro/BendExportMacro.dll`. In SolidWorks 2022, open each representative
-saved sheet-metal part and run that DLL from **Tools > Macro > Run**. The export is accepted
+This creates `macro/BendExportMacro.dll`. Keep it beside `macro/BendExportMacro.swb`.
+In SolidWorks 2022, open each representative saved sheet-metal part and run the SWB from
+**Tools > Macro > Run**. The SWB invokes the schema-v0.3 DLL through `ISldWorks.RunMacro2`.
+The export is accepted
 only when the result dialog has no `[ERROR]` entries and the generated JSON/DXF satisfy the
 checks above. Validate all three representative models before merging to `main`.
