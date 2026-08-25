@@ -46,7 +46,10 @@ namespace GenericCadLink.Macro
             package.CoordinateSystem = frame.ToInfo();
             package.FixedFace = fixedFace;
 
-            var candidates = CollectOneBends(model);
+            bool usingFlatPatternBends;
+            var candidates = CollectOneBends(model, out usingFlatPatternBends);
+            if (usingFlatPatternBends)
+                package.Warnings.Add("BEND_DISCOVERY_FALLBACK: using OneBend features below FlatPattern.");
             var folded = new List<BendDraft>();
             for (var i = 0; i < candidates.Count; i++)
             {
@@ -143,29 +146,45 @@ namespace GenericCadLink.Macro
             return draft;
         }
 
-        private static List<IFeature> CollectOneBends(ModelDoc2 model)
+        private static List<IFeature> CollectOneBends(ModelDoc2 model, out bool usingFlatPatternBends)
         {
-            var result = new List<IFeature>();
+            var folded = new List<IFeature>();
+            var flatPattern = new List<IFeature>();
             var feature = (IFeature)model.FirstFeature();
             while (feature != null)
             {
-                CollectOneBends(feature, false, result);
+                CollectOneBends(feature, false, folded, flatPattern);
                 feature = (IFeature)feature.GetNextFeature();
             }
-            return result;
+            usingFlatPatternBends = folded.Count == 0 && flatPattern.Count > 0;
+            return usingFlatPatternBends ? flatPattern : folded;
         }
 
-        private static void CollectOneBends(IFeature feature, bool underFlatPattern, List<IFeature> result)
+        private static void CollectOneBends(IFeature feature, bool underFlatPattern,
+            List<IFeature> folded, List<IFeature> flatPattern)
         {
             var type = feature.GetTypeName2();
             var inFlat = underFlatPattern || type == "FlatPattern";
-            if (type == "OneBend" && !inFlat) result.Add(feature);
+            if (type == "OneBend")
+            {
+                var target = inFlat ? flatPattern : folded;
+                if (!ContainsFeature(target, feature)) target.Add(feature);
+            }
             var child = (IFeature)feature.GetFirstSubFeature();
             while (child != null)
             {
-                CollectOneBends(child, inFlat, result);
+                CollectOneBends(child, inFlat, folded, flatPattern);
                 child = (IFeature)child.GetNextSubFeature();
             }
+        }
+
+        private static bool ContainsFeature(List<IFeature> features, IFeature candidate)
+        {
+            var name = candidate.Name ?? "";
+            var type = candidate.GetTypeName2() ?? "";
+            foreach (var feature in features)
+                if ((feature.Name ?? "") == name && (feature.GetTypeName2() ?? "") == type) return true;
+            return false;
         }
 
         private static bool ExportDxf(PartDoc part, string modelPath, string dxfPath, CoordinateFrame frame)
