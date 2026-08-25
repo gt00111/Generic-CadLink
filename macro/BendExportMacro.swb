@@ -48,8 +48,12 @@ Sub main()
     Exit Sub
 
 LaunchFailed:
-    WriteLauncherLog "Launcher error " & CStr(Err.Number) & ": " & Err.Description
-    MsgBox "V03_LAUNCH_FAILED: " & CStr(Err.Number) & " - " & Err.Description, _
+    Dim launchErrorNumber As Long
+    Dim launchErrorDescription As String
+    launchErrorNumber = Err.Number
+    launchErrorDescription = Err.Description
+    WriteLauncherLog "Launcher error " & CStr(launchErrorNumber) & ": " & launchErrorDescription
+    MsgBox "V03_LAUNCH_FAILED: " & CStr(launchErrorNumber) & " - " & launchErrorDescription, _
         vbCritical, "Generic CadLink schema v0.3"
 End Sub
 
