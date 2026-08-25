@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using GenericCadLink.Macro.Models;
 using SolidWorks.Interop.sldworks;
 
@@ -104,7 +105,8 @@ namespace GenericCadLink.Macro.Geometry
                 Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12 &&
                 VectorMath.Dot(candidates[0].Normal, candidates[1].Normal) < 1.0 - 1e-6)
             {
-                result.Error = "MOVING_FACE_AMBIGUOUS: equal topology/area candidates have different normals.";
+                result.Error = "MOVING_FACE_AMBIGUOUS: " + DescribeCandidate(candidates[0]) +
+                    " vs " + DescribeCandidate(candidates[1]);
                 return result;
             }
             result.BentFaceNormalModel = candidates[0].Normal;
@@ -112,6 +114,23 @@ namespace GenericCadLink.Macro.Geometry
             result.MovingFaceId = GetPersistentId(candidates[0].Face);
             result.StationaryFaceId = GetPersistentId(fixedFace);
             return result;
+        }
+
+        private static string DescribeCandidate(FaceCandidate candidate)
+        {
+            return "{normal=" + FormatVector(candidate.Normal) +
+                ", point=" + FormatVector(candidate.Point) +
+                ", distance=" + candidate.TopologyDistance.ToString(CultureInfo.InvariantCulture) +
+                ", area=" + candidate.Area.ToString("0.#########", CultureInfo.InvariantCulture) +
+                ", curved=" + candidate.SharesCurvedBendFace.ToString().ToLowerInvariant() + "}";
+        }
+
+        private static string FormatVector(Vector3Info value)
+        {
+            if (value == null) return "null";
+            return "[" + value.X.ToString("0.######", CultureInfo.InvariantCulture) + "," +
+                value.Y.ToString("0.######", CultureInfo.InvariantCulture) + "," +
+                value.Z.ToString("0.######", CultureInfo.InvariantCulture) + "]";
         }
 
         private bool SharesCurvedNeighbor(Face2 first, Face2 second)
