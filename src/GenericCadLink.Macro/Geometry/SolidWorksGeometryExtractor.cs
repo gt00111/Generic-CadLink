@@ -63,7 +63,8 @@ namespace GenericCadLink.Macro.Geometry
         public FoldedBendGeometry CaptureFoldedGeometry(IFeature feature, Face2 fixedFace, CoordinateFrame frame, AxisInfo axis, double angleDeg)
         {
             var result = new FoldedBendGeometry();
-            var faces = feature.GetFaces() as object[];
+            var faces = GetSolidBodyFaces();
+            if (faces == null || faces.Length == 0) faces = feature.GetFaces() as object[];
             if (faces == null) { result.Error = "FEATURE_FACES_MISSING"; return result; }
 
             var candidates = new List<FaceCandidate>();
@@ -73,6 +74,8 @@ namespace GenericCadLink.Macro.Geometry
                 if (face == null) continue;
                 var normal = VectorMath.Normalize(ReadVector(face.Normal));
                 if (normal == null) continue;
+                var exportNormal = frame.VectorToExport(normal);
+                if (exportNormal == null || Math.Abs(VectorMath.Dot(exportNormal, axis.Direction)) > 1e-6) continue;
                 var dot = Math.Max(-1.0, Math.Min(1.0, VectorMath.Dot(frame.NormalModel, normal)));
                 var measured = Math.Acos(dot) * 180.0 / Math.PI;
                 var error = Math.Min(Math.Abs(measured - angleDeg), Math.Abs((360.0 - measured) - angleDeg));
@@ -118,6 +121,24 @@ namespace GenericCadLink.Macro.Geometry
             result.MovingFaceId = GetPersistentId(candidates[0].Face);
             result.StationaryFaceId = GetPersistentId(fixedFace);
             return result;
+        }
+
+        private object[] GetSolidBodyFaces()
+        {
+            var part = _model as PartDoc;
+            if (part == null) return null;
+            var bodies = part.GetBodies2(0, true) as object[];
+            if (bodies == null) return null;
+            var result = new List<object>();
+            foreach (var bodyObject in bodies)
+            {
+                var body = bodyObject as Body2;
+                if (body == null) continue;
+                var faces = body.GetFaces() as object[];
+                if (faces == null) continue;
+                result.AddRange(faces);
+            }
+            return result.ToArray();
         }
 
         private static string DescribeCandidate(FaceCandidate candidate)
