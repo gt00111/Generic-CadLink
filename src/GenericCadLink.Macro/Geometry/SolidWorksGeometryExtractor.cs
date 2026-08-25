@@ -220,31 +220,55 @@ namespace GenericCadLink.Macro.Geometry
         {
             axis = null; error = null;
             var data = feature.GetDefinition() as IOneBendFeatureData;
-            if (data == null) { error = "ONE_BEND_DEFINITION_MISSING"; return false; }
-            data.AccessSelections(_model, null);
-            try
+            object[] segments = null;
+            if (data != null)
             {
-                var segments = data.FlatPatternSketchSegments2 as object[];
-                if (segments == null) { error = "FLAT_BEND_SEGMENTS_MISSING"; return false; }
-                SketchLine best = null; double bestLength = 0;
-                foreach (var item in segments)
-                {
-                    var line = item as SketchLine;
-                    var segment = item as SketchSegment;
-                    if (line == null || segment == null) continue;
-                    var length = segment.GetLength();
-                    if (length > bestLength) { best = line; bestLength = length; }
-                }
-                if (best == null || bestLength <= 0) { error = "FLAT_BEND_AXIS_MISSING"; return false; }
-                var start = frame.PointToExport(ReadSketchPoint(best.GetStartPoint2()));
-                var end = frame.PointToExport(ReadSketchPoint(best.GetEndPoint2()));
-                VectorMath.OrderAxisEndpoints(ref start, ref end);
-                var direction = VectorMath.Normalize(VectorMath.Subtract(end, start));
-                if (direction == null) { error = "BEND_AXIS_DEGENERATE"; return false; }
-                axis = new AxisInfo { Start = start, End = end, Direction = direction };
-                return true;
+                data.AccessSelections(_model, null);
+                try { segments = data.FlatPatternSketchSegments2 as object[]; }
+                finally { data.ReleaseSelectionAccess(); }
             }
-            finally { data.ReleaseSelectionAccess(); }
+            if (segments == null) segments = ReadSketchSegments(feature);
+            if (segments == null) { error = "FLAT_BEND_SEGMENTS_MISSING"; return false; }
+
+            SketchLine best = null; double bestLength = 0;
+            foreach (var item in segments)
+            {
+                var line = item as SketchLine;
+                var segment = item as SketchSegment;
+                if (line == null || segment == null) continue;
+                var length = segment.GetLength();
+                if (length > bestLength) { best = line; bestLength = length; }
+            }
+            if (best == null || bestLength <= 0) { error = "FLAT_BEND_AXIS_MISSING"; return false; }
+            var start = frame.PointToExport(ReadSketchPoint(best.GetStartPoint2()));
+            var end = frame.PointToExport(ReadSketchPoint(best.GetEndPoint2()));
+            VectorMath.OrderAxisEndpoints(ref start, ref end);
+            var direction = VectorMath.Normalize(VectorMath.Subtract(end, start));
+            if (direction == null) { error = "BEND_AXIS_DEGENERATE"; return false; }
+            axis = new AxisInfo { Start = start, End = end, Direction = direction };
+            return true;
+        }
+
+        private static object[] ReadSketchSegments(IFeature feature)
+        {
+            var sketch = feature.GetSpecificFeature2() as Sketch;
+            if (sketch != null)
+            {
+                var segments = sketch.GetSketchSegments() as object[];
+                if (segments != null && segments.Length > 0) return segments;
+            }
+            var child = feature.GetFirstSubFeature() as IFeature;
+            while (child != null)
+            {
+                sketch = child.GetSpecificFeature2() as Sketch;
+                if (sketch != null)
+                {
+                    var segments = sketch.GetSketchSegments() as object[];
+                    if (segments != null && segments.Length > 0) return segments;
+                }
+                child = child.GetNextSubFeature() as IFeature;
+            }
+            return null;
         }
 
         public double ComputeSignedAngle(AxisInfo axis, CoordinateFrame frame, Vector3Info bentNormalModel, double angleDeg, out string error)
