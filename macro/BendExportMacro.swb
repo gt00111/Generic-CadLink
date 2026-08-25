@@ -12,6 +12,7 @@ Sub main()
     WriteLauncherLog "SWB main started"
     If Not ConnectSwApp() Then Exit Sub
     WriteLauncherLog "Connected to SolidWorks"
+    DumpActiveFeatureTree
 
     Dim macroFolder As String
     macroFolder = GetThisMacroFolder()
@@ -50,6 +51,45 @@ LaunchFailed:
     WriteLauncherLog "Launcher error " & CStr(Err.Number) & ": " & Err.Description
     MsgBox "V03_LAUNCH_FAILED: " & CStr(Err.Number) & " - " & Err.Description, _
         vbCritical, "Generic CadLink schema v0.3"
+End Sub
+
+Private Sub DumpActiveFeatureTree()
+    On Error GoTo DumpFailed
+    Dim model As Object
+    Set model = swApp.ActiveDoc
+    If model Is Nothing Then
+        WriteLauncherLog "FEATURE_TREE: NO_ACTIVE_DOCUMENT"
+        Exit Sub
+    End If
+
+    WriteLauncherLog "FEATURE_TREE_BEGIN: " & model.GetPathName
+    Dim feature As Object
+    Set feature = model.FirstFeature
+    Do While Not feature Is Nothing
+        DumpFeatureBranch feature, 0
+        Set feature = feature.GetNextFeature
+    Loop
+    WriteLauncherLog "FEATURE_TREE_END"
+    Exit Sub
+
+DumpFailed:
+    WriteLauncherLog "FEATURE_TREE_ERROR " & CStr(Err.Number) & ": " & Err.Description
+End Sub
+
+Private Sub DumpFeatureBranch(feature As Object, depth As Long)
+    On Error GoTo BranchFailed
+    WriteLauncherLog "FEATURE " & CStr(depth) & ": " & feature.Name & " | " & feature.GetTypeName2
+
+    Dim child As Object
+    Set child = feature.GetFirstSubFeature
+    Do While Not child Is Nothing
+        DumpFeatureBranch child, depth + 1
+        Set child = child.GetNextSubFeature
+    Loop
+    Exit Sub
+
+BranchFailed:
+    WriteLauncherLog "FEATURE_ERROR " & CStr(depth) & ": " & CStr(Err.Number) & " - " & Err.Description
 End Sub
 
 Private Sub WriteLauncherLog(message As String)
