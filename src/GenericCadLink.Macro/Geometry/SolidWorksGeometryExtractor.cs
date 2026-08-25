@@ -83,12 +83,15 @@ namespace GenericCadLink.Macro.Geometry
                         Point = ReadFacePoint(face),
                         Area = face.GetArea(),
                         TopologyDistance = GetTopologicalDistance(fixedFace, face),
+                        SharesCurvedBendFace = SharesCurvedNeighbor(fixedFace, face),
                     });
             }
 
             candidates.RemoveAll(x => x.TopologyDistance < 0);
             candidates.Sort((a, b) =>
             {
+                var byCurvedConnection = b.SharesCurvedBendFace.CompareTo(a.SharesCurvedBendFace);
+                if (byCurvedConnection != 0) return byCurvedConnection;
                 var byDistance = a.TopologyDistance.CompareTo(b.TopologyDistance);
                 if (byDistance != 0) return byDistance;
                 var byArea = b.Area.CompareTo(a.Area);
@@ -96,7 +99,8 @@ namespace GenericCadLink.Macro.Geometry
                 return string.CompareOrdinal(GetPersistentId(a.Face), GetPersistentId(b.Face));
             });
             if (candidates.Count == 0) { result.Error = "MOVING_FACE_NOT_FOUND"; return result; }
-            if (candidates.Count > 1 && candidates[0].TopologyDistance == candidates[1].TopologyDistance &&
+            if (candidates.Count > 1 && candidates[0].SharesCurvedBendFace == candidates[1].SharesCurvedBendFace &&
+                candidates[0].TopologyDistance == candidates[1].TopologyDistance &&
                 Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12 &&
                 VectorMath.Dot(candidates[0].Normal, candidates[1].Normal) < 1.0 - 1e-6)
             {
@@ -107,6 +111,50 @@ namespace GenericCadLink.Macro.Geometry
             result.MovingFacePointModel = candidates[0].Point;
             result.MovingFaceId = GetPersistentId(candidates[0].Face);
             result.StationaryFaceId = GetPersistentId(fixedFace);
+            return result;
+        }
+
+        private bool SharesCurvedNeighbor(Face2 first, Face2 second)
+        {
+            var firstNeighbors = GetAdjacentFaces(first);
+            var secondIds = new HashSet<string>();
+            foreach (var face in GetAdjacentFaces(second))
+            {
+                var id = GetPersistentId(face);
+                if (id != null) secondIds.Add(id);
+            }
+
+            foreach (var face in firstNeighbors)
+            {
+                var id = GetPersistentId(face);
+                if (id == null || !secondIds.Contains(id)) continue;
+                try
+                {
+                    var surface = face.GetSurface() as Surface;
+                    if (surface != null && surface.IsCylinder()) return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        private static List<Face2> GetAdjacentFaces(Face2 face)
+        {
+            var result = new List<Face2>();
+            var edges = face.GetEdges() as object[];
+            if (edges == null) return result;
+            foreach (var edgeObject in edges)
+            {
+                var edge = edgeObject as Edge;
+                if (edge == null) continue;
+                var adjacent = edge.GetTwoAdjacentFaces2() as object[];
+                if (adjacent == null) continue;
+                foreach (var faceObject in adjacent)
+                {
+                    var adjacentFace = faceObject as Face2;
+                    if (adjacentFace != null) result.Add(adjacentFace);
+                }
+            }
             return result;
         }
 
@@ -241,7 +289,7 @@ namespace GenericCadLink.Macro.Geometry
         private static Vector3Info ReadSketchPoint(object pointObject) { var p = pointObject as SketchPoint; return p == null ? null : new Vector3Info(p.X, p.Y, p.Z); }
         private static Vector3Info ReadVector(object value) { var p = value as double[]; return p == null || p.Length < 3 ? null : new Vector3Info(p[0], p[1], p[2]); }
 
-        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public int TopologyDistance; }
+        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public int TopologyDistance; public bool SharesCurvedBendFace; }
         private sealed class FaceDistance { public Face2 Face; public int Distance; }
     }
 
