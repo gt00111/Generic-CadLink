@@ -17,7 +17,7 @@ Private Const SW_SM_OPT_GEOMETRY As Long = 1
 Private Const SW_SM_OPT_BEND_LINES As Long = 4
 Private Const SW_FP_OPT_GEOMETRY As Long = 1
 Private Const SW_FP_OPT_BEND_LINES As Long = 2
-Private Const CADLINK_VERSION As String = "0.2.1"
+Private Const CADLINK_VERSION As String = "0.3.1"
 Private Const DXF_MAP_FILE As String = "GenericCadLink.slddxfmap"
 Private Const DXF_MAP_FILE_ALT As String = "GenericCadLink.dxfmap"
 Private Const CONFIG_FILE As String = "cadlink.config.json"
@@ -134,6 +134,7 @@ Private Sub ExportBendJson()
     If Len(dxfWarn) > 0 Then warnings = warnings & dxfWarn
 
     bendsJson = PatchBendLengthsFromDxf(bendsJson, dxfPath)
+    bendsJson = EnrichBendsV03FromDxf(bendsJson, dxfPath, bendCount, errors)
 
     If gBendLengthUnknownCount > 0 Then
         warnings = warnings & "BEND_LENGTH_UNKNOWN: " & gBendLengthUnknownCount & " bend(s) - length not available from SW API." & vbCrLf
@@ -493,6 +494,166 @@ Private Function ReplaceFirstNullLengthMm(json As String, lengthMm As Double) As
     ReplaceFirstNullLengthMm = Left$(json, pos - 1) & """lengthMm"": " & JsonNum(lengthMm) & Mid$(json, pos + Len(marker))
 End Function
 
+Private Function EnrichBendsV03FromDxf(bendsJson As String, dxfPath As String, expectedBendCount As Long, ByRef errors As String) As String
+    EnrichBendsV03FromDxf = bendsJson
+    If expectedBendCount <= 0 Then Exit Function
+    If Dir(dxfPath) = "" Then
+        errors = errors & "DXF_NOT_FOUND: v0.3 geometry could not be resolved." & vbCrLf
+        Exit Function
+    End If
+
+    Dim content As String
+    content = ReadWholeFile(dxfPath)
+    If Len(content) = 0 Then
+        errors = errors & "DXF_READ_FAILED: v0.3 geometry could not be resolved." & vbCrLf
+        Exit Function
+    End If
+
+    Dim lines() As String
+    lines = SplitLinesAny(content)
+    Dim x1() As Double, y1() As Double, x2() As Double, y2() As Double
+    Dim layers() As String, handles() As String
+    ReDim x1(1 To expectedBendCount)
+    ReDim y1(1 To expectedBendCount)
+    ReDim x2(1 To expectedBendCount)
+    ReDim y2(1 To expectedBendCount)
+    ReDim layers(1 To expectedBendCount)
+    ReDim handles(1 To expectedBendCount)
+
+    Dim found As Long
+    Dim haveBounds As Boolean
+    Dim minX As Double, minY As Double, maxX As Double, maxY As Double
+    Dim inEntities As Boolean
+    Dim i As Long
+    i = 0
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  2" And lines(i + 1) = "ENTITIES" Then
+            inEntities = True
+            i = i + 2
+        ElseIf inEntities And lines(i) = "  0" Then
+            If lines(i + 1) = "ENDSEC" Then Exit Do
+            If lines(i + 1) = "LINE" Then
+                Dim ax As Double, ay As Double, bx As Double, by As Double
+                Dim hasLine As Boolean
+                hasLine = ReadDxfLineCoordinates(lines, i, ax, ay, bx, by)
+                If hasLine Then UpdateBounds ax, ay, bx, by, haveBounds, minX, minY, maxX, maxY
+
+                Dim layerName As String
+                layerName = UCase$(Trim$(ReadEntityGroupValue(lines, i, "  8")))
+                If hasLine And (layerName = "BEND_UP" Or layerName = "BEND_DOWN") Then
+                    found = found + 1
+                    If found <= expectedBendCount Then
+                        x1(found) = ax: y1(found) = ay
+                        x2(found) = bx: y2(found) = by
+                        layers(found) = layerName
+                        handles(found) = Trim$(ReadEntityGroupValue(lines, i, "  5"))
+                    End If
+                End If
+            End If
+            i = i + 2
+        Else
+            i = i + 1
+        End If
+    Loop
+
+    If found <> expectedBendCount Then
+        errors = errors & "DXF_BEND_COUNT_MISMATCH: JSON=" & expectedBendCount & ", DXF=" & found & vbCrLf
+        Exit Function
+    End If
+    If Not haveBounds Then
+        errors = errors & "DXF_BOUNDS_UNKNOWN: v0.3 moving side could not be resolved." & vbCrLf
+        Exit Function
+    End If
+
+    Dim centerX As Double, centerY As Double
+    centerX = (minX + maxX) / 2#: centerY = (minY + maxY) / 2#
+    Dim result As String
+    result = bendsJson
+    For i = 1 To expectedBendCount
+        Dim dx As Double, dy As Double, axisLength As Double
+        dx = x2(i) - x1(i): dy = y2(i) - y1(i)
+        axisLength = Sqr(dx * dx + dy * dy)
+        If axisLength <= 0.000001 Then
+            errors = errors & "ZERO_LENGTH_BEND_AXIS[B" & i & "]" & vbCrLf
+            EnrichBendsV03FromDxf = bendsJson
+            Exit Function
+        End If
+
+        Dim midX As Double, midY As Double, leftX As Double, leftY As Double
+        Dim movingX As Double, movingY As Double, centerSide As Double
+        midX = (x1(i) + x2(i)) / 2#: midY = (y1(i) + y2(i)) / 2#
+        leftX = -dy / axisLength: leftY = dx / axisLength
+        centerSide = (centerX - midX) * leftX + (centerY - midY) * leftY
+        If centerSide >= 0# Then
+            movingX = midX - leftX * 3#: movingY = midY - leftY * 3#
+        Else
+            movingX = midX + leftX * 3#: movingY = midY + leftY * 3#
+        End If
+
+        ' Canonical axis: moving side is always on the right of start -> end.
+        If dx * (movingY - midY) - dy * (movingX - midX) > 0# Then
+            Dim swapValue As Double
+            swapValue = x1(i): x1(i) = x2(i): x2(i) = swapValue
+            swapValue = y1(i): y1(i) = y2(i): y2(i) = swapValue
+            dx = -dx: dy = -dy
+        End If
+
+        Dim axisJson As String, movingJson As String, lineJson As String
+        axisJson = "      ""axis"": {""start"": [" & JsonNum(x1(i)) & ", " & JsonNum(y1(i)) & ", 0], ""end"": [" & JsonNum(x2(i)) & ", " & JsonNum(y2(i)) & ", 0], ""direction"": [" & JsonNum(dx / axisLength) & ", " & JsonNum(dy / axisLength) & ", 0]},"
+        movingJson = "      ""movingSidePoint"": [" & JsonNum(movingX) & ", " & JsonNum(movingY) & ", 0],"
+        lineJson = "      ""dxfLine"": {""start"": [" & JsonNum(x1(i)) & ", " & JsonNum(y1(i)) & "], ""end"": [" & JsonNum(x2(i)) & ", " & JsonNum(y2(i)) & "], ""layer"": """ & layers(i) & """, ""handle"": """ & JsonEscape(handles(i)) & """},"
+        result = ReplaceFirstText(result, "      ""axis"": null,", axisJson)
+        result = ReplaceFirstText(result, "      ""movingSidePoint"": null,", movingJson)
+        result = ReplaceFirstText(result, "      ""dxfLine"": null,", lineJson)
+    Next i
+    EnrichBendsV03FromDxf = result
+End Function
+
+Private Function ReadDxfLineCoordinates(lines() As String, startIdx As Long, ByRef x1 As Double, ByRef y1 As Double, ByRef x2 As Double, ByRef y2 As Double) As Boolean
+    On Error GoTo Fail
+    Dim haveX1 As Boolean, haveY1 As Boolean, haveX2 As Boolean, haveY2 As Boolean
+    Dim i As Long
+    i = startIdx + 2
+    Do While i <= UBound(lines) - 1
+        If lines(i) = "  0" Then Exit Do
+        Select Case lines(i)
+            Case " 10": x1 = CDbl(lines(i + 1)): haveX1 = True
+            Case " 20": y1 = CDbl(lines(i + 1)): haveY1 = True
+            Case " 11": x2 = CDbl(lines(i + 1)): haveX2 = True
+            Case " 21": y2 = CDbl(lines(i + 1)): haveY2 = True
+        End Select
+        i = i + 2
+    Loop
+    ReadDxfLineCoordinates = haveX1 And haveY1 And haveX2 And haveY2
+    Exit Function
+Fail:
+    ReadDxfLineCoordinates = False
+End Function
+
+Private Sub UpdateBounds(x1 As Double, y1 As Double, x2 As Double, y2 As Double, ByRef initialized As Boolean, ByRef minX As Double, ByRef minY As Double, ByRef maxX As Double, ByRef maxY As Double)
+    If Not initialized Then
+        minX = x1: maxX = x1: minY = y1: maxY = y1: initialized = True
+    End If
+    If x1 < minX Then minX = x1
+    If x2 < minX Then minX = x2
+    If y1 < minY Then minY = y1
+    If y2 < minY Then minY = y2
+    If x1 > maxX Then maxX = x1
+    If x2 > maxX Then maxX = x2
+    If y1 > maxY Then maxY = y1
+    If y2 > maxY Then maxY = y2
+End Sub
+
+Private Function ReplaceFirstText(source As String, findText As String, replacement As String) As String
+    Dim pos As Long
+    pos = InStr(1, source, findText, vbBinaryCompare)
+    If pos = 0 Then
+        ReplaceFirstText = source
+    Else
+        ReplaceFirstText = Left$(source, pos - 1) & replacement & Mid$(source, pos + Len(findText))
+    End If
+End Function
+
 Private Function ExtractBendLineLengthsFromDxf(dxfPath As String) As Double()
     Dim emptyArr(-1 To -1) As Double
     ExtractBendLineLengthsFromDxf = emptyArr
@@ -815,10 +976,14 @@ Private Function BendToJson(swModel As Object, swFeat As Object, bendIndex As Lo
 
     BendToJson = "    {" & vbCrLf & _
         "      ""id"": ""B" & bendIndex & """," & vbCrLf & _
-        "      ""dxfLayer"": """ & dxfLayer & """," & vbCrLf & _
-        "      ""direction"": """ & direction & """," & vbCrLf & _
         "      ""innerRadius"": " & JsonNum(Round4(innerR)) & "," & vbCrLf & _
         "      ""angleDeg"": " & JsonNum(angleDeg) & "," & vbCrLf & _
+        "      ""signedAngleDeg"": " & JsonNum(IIf(direction = "up", angleDeg, -angleDeg)) & "," & vbCrLf & _
+        "      ""direction"": """ & direction & """," & vbCrLf & _
+        "      ""axis"": null," & vbCrLf & _
+        "      ""movingSidePoint"": null," & vbCrLf & _
+        "      ""dxfLine"": null," & vbCrLf & _
+        "      ""dxfLayer"": """ & dxfLayer & """," & vbCrLf & _
         "      ""lengthMm"": " & lengthPart & "," & vbCrLf & _
         "      ""swFeatureName"": """ & JsonEscape(featName) & """" & vbCrLf & _
         "    }"
@@ -1418,7 +1583,7 @@ Private Function BuildJson(partPath As String, partNumber As String, thickness A
     End If
 
     BuildJson = "{" & vbCrLf & _
-        "  ""schemaVersion"": ""0.1""," & vbCrLf & _
+        "  ""schemaVersion"": ""0.3""," & vbCrLf & _
         "  ""exportedAt"": """ & JsonEscape(NowIso8601()) & """," & vbCrLf & _
         "  ""source"": {" & vbCrLf & _
         "    ""cad"": ""SolidWorks""," & vbCrLf & _
@@ -1431,11 +1596,19 @@ Private Function BuildJson(partPath As String, partNumber As String, thickness A
         "  ""revision"": null," & vbCrLf & _
         "  ""thickness"": " & JsonNum(thickness) & "," & vbCrLf & _
         "  ""material"": " & matJson & "," & vbCrLf & _
-        "  ""fixedFace"": null," & vbCrLf & _
-        "  ""units"": ""mm""," & vbCrLf & _
         "  ""coordinateSystem"": {" & vbCrLf & _
-        "    ""origin"": ""flatPattern""," & vbCrLf & _
-        "    ""description"": ""Phase 1: flat pattern coordinate""" & vbCrLf & _
+        "    ""unit"": ""mm""," & vbCrLf & _
+        "    ""handedness"": ""right""," & vbCrLf & _
+        "    ""flatPlane"": ""XY""," & vbCrLf & _
+        "    ""origin"": [0, 0, 0]," & vbCrLf & _
+        "    ""xAxis"": [1, 0, 0]," & vbCrLf & _
+        "    ""yAxis"": [0, 1, 0]," & vbCrLf & _
+        "    ""flatNormal"": [0, 0, 1]" & vbCrLf & _
+        "  }," & vbCrLf & _
+        "  ""fixedFace"": {" & vbCrLf & _
+        "    ""side"": ""unknown""," & vbCrLf & _
+        "    ""normal"": [0, 0, 1]," & vbCrLf & _
+        "    ""resolved"": false" & vbCrLf & _
         "  }," & vbCrLf & _
         "  ""bends"": [" & vbCrLf & bendsJson & vbCrLf & "  ]," & vbCrLf & _
         "  ""errors"": " & JsonStringArray(errors) & "," & vbCrLf & _
