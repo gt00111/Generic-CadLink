@@ -90,13 +90,17 @@ namespace GenericCadLink.Macro.Geometry
             candidates.Sort((a, b) =>
             {
                 var byDistance = a.TopologyDistance.CompareTo(b.TopologyDistance);
-                return byDistance != 0 ? byDistance : b.Area.CompareTo(a.Area);
+                if (byDistance != 0) return byDistance;
+                var byArea = b.Area.CompareTo(a.Area);
+                if (byArea != 0) return byArea;
+                return string.CompareOrdinal(GetPersistentId(a.Face), GetPersistentId(b.Face));
             });
             if (candidates.Count == 0) { result.Error = "MOVING_FACE_NOT_FOUND"; return result; }
             if (candidates.Count > 1 && candidates[0].TopologyDistance == candidates[1].TopologyDistance &&
-                Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12)
+                Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12 &&
+                VectorMath.Dot(candidates[0].Normal, candidates[1].Normal) < 1.0 - 1e-6)
             {
-                result.Error = "MOVING_FACE_AMBIGUOUS";
+                result.Error = "MOVING_FACE_AMBIGUOUS: equal topology/area candidates have different normals.";
                 return result;
             }
             result.BentFaceNormalModel = candidates[0].Normal;
