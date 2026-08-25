@@ -178,16 +178,18 @@ namespace GenericCadLink.Macro
 
         private static List<BendCandidate> CollectBendCandidates(ModelDoc2 model, out string error)
         {
-            var folded = new List<IFeature>();
+            var oneBends = new List<IFeature>();
+            var userBends = new List<IFeature>();
             var flatPattern = new List<IFeature>();
             var feature = (IFeature)model.FirstFeature();
             while (feature != null)
             {
-                CollectBendFeatures(feature, false, folded, flatPattern);
+                CollectBendFeatures(feature, false, oneBends, userBends, flatPattern);
                 feature = (IFeature)feature.GetNextFeature();
             }
             error = null;
             var result = new List<BendCandidate>();
+            var folded = oneBends.Count > 0 ? oneBends : userBends;
             if (folded.Count == 0 && flatPattern.Count == 0) return result;
             if (folded.Count != flatPattern.Count)
             {
@@ -200,7 +202,7 @@ namespace GenericCadLink.Macro
         }
 
         private static void CollectBendFeatures(IFeature feature, bool underFlatPattern,
-            List<IFeature> folded, List<IFeature> flatPattern)
+            List<IFeature> oneBends, List<IFeature> userBends, List<IFeature> flatPattern)
         {
             var type = feature.GetTypeName2();
             var inFlat = underFlatPattern || type == "FlatPattern";
@@ -208,14 +210,18 @@ namespace GenericCadLink.Macro
             {
                 if (!ContainsFeature(flatPattern, feature)) flatPattern.Add(feature);
             }
-            else if (!inFlat && (type == "OneBend" || type == "SketchBend" || type == "SM3dBend" || type == "EdgeFlange" || type == "MiterFlange"))
+            else if (!inFlat && type == "OneBend")
             {
-                if (!ContainsFeature(folded, feature)) folded.Add(feature);
+                if (!ContainsFeature(oneBends, feature)) oneBends.Add(feature);
+            }
+            else if (!inFlat && (type == "SketchBend" || type == "SM3dBend" || type == "EdgeFlange" || type == "MiterFlange"))
+            {
+                if (!ContainsFeature(userBends, feature)) userBends.Add(feature);
             }
             var child = (IFeature)feature.GetFirstSubFeature();
             while (child != null)
             {
-                CollectBendFeatures(child, inFlat, folded, flatPattern);
+                CollectBendFeatures(child, inFlat, oneBends, userBends, flatPattern);
                 child = (IFeature)child.GetNextSubFeature();
             }
         }
