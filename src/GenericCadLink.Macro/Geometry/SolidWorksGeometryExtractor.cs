@@ -9,8 +9,13 @@ namespace GenericCadLink.Macro.Geometry
     internal sealed class SolidWorksGeometryExtractor
     {
         private readonly ModelDoc2 _model;
+        private readonly MathUtility _math;
 
-        public SolidWorksGeometryExtractor(ModelDoc2 model) { _model = model; }
+        public SolidWorksGeometryExtractor(ModelDoc2 model, SldWorks app)
+        {
+            _model = model;
+            _math = app.GetMathUtility() as MathUtility;
+        }
 
         public bool TryCreateFixedFrame(IFeature flatPattern, out CoordinateFrame frame, out FixedFaceInfo fixedFace, out Face2 fixedFaceObject, out string error)
         {
@@ -270,6 +275,118 @@ namespace GenericCadLink.Macro.Geometry
             return true;
         }
 
+        public List<FlatBendLineInfo> ReadFlatPatternBendLines(IFeature flatPattern, CoordinateFrame frame)
+        {
+            var result = new List<FlatBendLineInfo>();
+            CollectFlatPatternBendLines(flatPattern, frame, result);
+            return result;
+        }
+
+        private void CollectFlatPatternBendLines(IFeature feature, CoordinateFrame frame, List<FlatBendLineInfo> result)
+        {
+            if (feature == null) return;
+            var sketch = feature.GetSpecificFeature2() as Sketch;
+            var segments = sketch == null ? null : sketch.GetSketchSegments() as object[];
+            if (segments != null)
+            {
+                foreach (var item in segments)
+                {
+                    var line = item as SketchLine;
+                    var segment = item as SketchSegment;
+                    if (line == null || segment == null) continue;
+                    string bendDirection;
+                    if (!TryReadSegmentBendDirection(segment, out bendDirection)) continue;
+
+                    var startModel = ReadSketchPointInModel(sketch, line.GetStartPoint2());
+                    var endModel = ReadSketchPointInModel(sketch, line.GetEndPoint2());
+                    if (startModel == null || endModel == null) continue;
+                    var start = frame.PointToExport(startModel);
+                    var end = frame.PointToExport(endModel);
+                    VectorMath.OrderAxisEndpoints(ref start, ref end);
+                    var axisDirection = VectorMath.Normalize(VectorMath.Subtract(end, start));
+                    if (axisDirection == null) continue;
+                    var candidate = new FlatBendLineInfo
+                    {
+                        Axis = new AxisInfo { Start = start, End = end, Direction = axisDirection },
+                        Direction = bendDirection,
+                    };
+                    if (!ContainsEquivalentFlatBendLine(result, candidate)) result.Add(candidate);
+                }
+            }
+
+            var child = feature.GetFirstSubFeature() as IFeature;
+            while (child != null)
+            {
+                CollectFlatPatternBendLines(child, frame, result);
+                child = child.GetNextSubFeature() as IFeature;
+            }
+        }
+
+        private static bool TryReadSegmentBendDirection(SketchSegment segment, out string direction)
+        {
+            direction = null;
+
+            int value;
+            try
+            {
+                value = Convert.ToInt32(((object)segment).GetType().InvokeMember(
+                    "GetBendLineDirection",
+                    System.Reflection.BindingFlags.InvokeMethod,
+                    null,
+                    segment,
+                    null), CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            if (value == 1) direction = "up";
+            else if (value == 2) direction = "down";
+            return direction != null;
+        }
+
+        public bool TryMatchFlatBendDirection(AxisInfo axis, IList<FlatBendLineInfo> lines,
+            ISet<int> used, out string direction, out string error)
+        {
+            direction = null; error = null;
+            var best = -1;
+            var bestError = double.MaxValue;
+            for (var i = 0; i < lines.Count; i++)
+            {
+                if (used.Contains(i)) continue;
+                var candidate = lines[i].Axis;
+                var direct = VectorMath.Length(VectorMath.Subtract(axis.Start, candidate.Start)) +
+                    VectorMath.Length(VectorMath.Subtract(axis.End, candidate.End));
+                var reverse = VectorMath.Length(VectorMath.Subtract(axis.Start, candidate.End)) +
+                    VectorMath.Length(VectorMath.Subtract(axis.End, candidate.Start));
+                var matchError = Math.Min(direct, reverse);
+                if (matchError < bestError) { best = i; bestError = matchError; }
+            }
+            if (best < 0 || bestError > 0.1)
+            {
+                error = "FLAT_BEND_DIRECTION_MATCH_FAILED: directionLines=" + lines.Count +
+                    ", distanceMm=" + (best < 0 ? "n/a" : bestError.ToString("0.######", CultureInfo.InvariantCulture));
+                return false;
+            }
+            used.Add(best);
+            direction = lines[best].Direction;
+            return true;
+        }
+
+        private static bool ContainsEquivalentFlatBendLine(IList<FlatBendLineInfo> lines, FlatBendLineInfo candidate)
+        {
+            foreach (var existing in lines)
+            {
+                var direct = VectorMath.Length(VectorMath.Subtract(existing.Axis.Start, candidate.Axis.Start)) +
+                    VectorMath.Length(VectorMath.Subtract(existing.Axis.End, candidate.Axis.End));
+                var reverse = VectorMath.Length(VectorMath.Subtract(existing.Axis.Start, candidate.Axis.End)) +
+                    VectorMath.Length(VectorMath.Subtract(existing.Axis.End, candidate.Axis.Start));
+                if (Math.Min(direct, reverse) <= 0.01 && existing.Direction == candidate.Direction) return true;
+            }
+            return false;
+        }
+
         private static object[] ReadSketchSegments(IFeature feature)
         {
             var sketch = feature.GetSpecificFeature2() as Sketch;
@@ -292,13 +409,46 @@ namespace GenericCadLink.Macro.Geometry
             return null;
         }
 
-        public double ComputeSignedAngle(AxisInfo axis, CoordinateFrame frame, Vector3Info bentNormalModel, double angleDeg, out string error)
+        public double ComputeSignedAngleFromMovingSide(AxisInfo axis, CoordinateFrame frame,
+            Vector3Info flatMovingSidePoint, Vector3Info foldedMovingFacePointModel,
+            double angleDeg, out string error)
         {
             error = null;
-            var bent = frame.VectorToExport(bentNormalModel);
-            var triple = VectorMath.Dot(axis.Direction, VectorMath.Cross(new Vector3Info(0, 0, 1), bent));
-            if (!VectorMath.IsFinite(triple) || Math.Abs(triple) <= 1e-9) { error = "SIGNED_ANGLE_UNRESOLVED"; return 0; }
-            return Math.Sign(triple) * Math.Abs(angleDeg);
+            if (axis == null || flatMovingSidePoint == null || foldedMovingFacePointModel == null)
+            {
+                error = "SIGNED_ANGLE_POINTS_MISSING";
+                return 0;
+            }
+
+            var midpoint = VectorMath.Scale(VectorMath.Add(axis.Start, axis.End), 0.5);
+            var flatVector = VectorMath.Subtract(flatMovingSidePoint, midpoint);
+            var foldedPoint = frame.PointToExport(foldedMovingFacePointModel);
+            var foldedVector = VectorMath.Subtract(foldedPoint, midpoint);
+
+            // Remove any component along the bend axis. Only the rotation in the
+            // plane perpendicular to the axis determines mountain/valley.
+            flatVector = VectorMath.Subtract(flatVector,
+                VectorMath.Scale(axis.Direction, VectorMath.Dot(flatVector, axis.Direction)));
+            foldedVector = VectorMath.Subtract(foldedVector,
+                VectorMath.Scale(axis.Direction, VectorMath.Dot(foldedVector, axis.Direction)));
+            flatVector = VectorMath.Normalize(flatVector);
+            foldedVector = VectorMath.Normalize(foldedVector);
+            if (flatVector == null || foldedVector == null)
+            {
+                error = "SIGNED_ANGLE_VECTOR_DEGENERATE";
+                return 0;
+            }
+
+            var sine = VectorMath.Dot(axis.Direction, VectorMath.Cross(flatVector, foldedVector));
+            var cosine = Math.Max(-1.0, Math.Min(1.0, VectorMath.Dot(flatVector, foldedVector)));
+            var measuredAngle = Math.Atan2(sine, cosine) * 180.0 / Math.PI;
+            if (!VectorMath.IsFinite(measuredAngle) || Math.Abs(measuredAngle) <= 1e-6)
+            {
+                error = "SIGNED_ANGLE_UNRESOLVED";
+                return 0;
+            }
+
+            return Math.Sign(measuredAngle) * Math.Abs(angleDeg);
         }
 
         public bool OrientAxisToMovingSide(AxisInfo axis, Vector3Info movingSidePoint)
@@ -375,6 +525,21 @@ namespace GenericCadLink.Macro.Geometry
             return VectorMath.Normalize(VectorMath.Cross(seed, normal));
         }
         private static Vector3Info ReadSketchPoint(object pointObject) { var p = pointObject as SketchPoint; return p == null ? null : new Vector3Info(p.X, p.Y, p.Z); }
+        private Vector3Info ReadSketchPointInModel(Sketch sketch, object pointObject)
+        {
+            var point = ReadSketchPoint(pointObject);
+            if (point == null || sketch == null || _math == null) return point;
+            try
+            {
+                var modelToSketch = sketch.ModelToSketchTransform;
+                var sketchToModel = modelToSketch == null ? null : modelToSketch.IInverse();
+                var mathPoint = _math.CreatePoint(new[] { point.X, point.Y, point.Z }) as MathPoint;
+                var transformed = mathPoint == null || sketchToModel == null ? null :
+                    mathPoint.MultiplyTransform(sketchToModel) as MathPoint;
+                return transformed == null ? point : ReadVector(transformed.ArrayData);
+            }
+            catch { return point; }
+        }
         private static Vector3Info ReadVector(object value) { var p = value as double[]; return p == null || p.Length < 3 ? null : new Vector3Info(p[0], p[1], p[2]); }
 
         private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public double AxisDistanceMm; public int TopologyDistance; public bool SharesCurvedBendFace; }
@@ -388,5 +553,11 @@ namespace GenericCadLink.Macro.Geometry
         public string StationaryFaceId { get; set; }
         public string MovingFaceId { get; set; }
         public string Error { get; set; }
+    }
+
+    internal sealed class FlatBendLineInfo
+    {
+        public AxisInfo Axis { get; set; }
+        public string Direction { get; set; }
     }
 }
