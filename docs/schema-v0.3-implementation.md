@@ -1,13 +1,8 @@
 # Schema v0.3 implementation
 
-The C# exporter under `src/GenericCadLink.Macro` is the authoritative schema-v0.3 exporter.
-`macro/BendExportMacro.swb` is a thin launcher that synchronously runs the sibling
-`macro/BendExportMacro.exe`. The host connects to the active SolidWorks session and invokes
-the same exporter implementation without requiring VSTA or COM registration.
+`src/GenericCadLink.Macro` がschema v0.3の正本実装です。`macro/BendExportMacro.swb` は同じフォルダの `BendExportMacro.exe` を同期起動します。
 
-## Output contract
-
-For each saved sheet-metal part, the exporter creates:
+## 出力契約
 
 ```text
 {exportRoot}/{partNumber}/
@@ -15,55 +10,45 @@ For each saved sheet-metal part, the exporter creates:
   flat.dxf
 ```
 
-`bend.json` contains the required deterministic geometry:
+`bend.json` は以下を含みます。
 
-- right-handed, millimetre, XY `coordinateSystem`
-- `fixedFace.normal` (the exported frame is always `[0, 0, 1]`)
-- canonical 3D `bends[].axis` in the same coordinate system as the DXF
-- geometry-derived `bends[].signedAngleDeg`
-- `bends[].movingSidePoint`, derived as the side opposite the fixed-face interior point
-- `bends[].dxfLine`, including the matched DXF handle and endpoints
+- mm・右手系・XY展開平面の `coordinateSystem`
+- `fixedFace.normal`
+- DXFと同じ座標系の `bends[].axis`
+- `bends[].signedAngleDeg` と `direction`
+- `bends[].movingSidePoint`
+- DXF端点・レイヤー・ハンドルを持つ `bends[].dxfLine`
 
-The exporter does not derive `up`/`down` directly from the SolidWorks bend-direction enum.
-It computes the sign from the canonical axis, flat normal, and folded moving-face normal.
-`direction` and the DXF layer are then derived from that signed angle.
+## UP/DOWNの正本
 
-## Strict failure policy
+SolidWorksフラットパターン配下の方向付き曲げ線を収集し、スケッチ座標をモデル座標、さらに出力座標へ変換します。各方向線はDXF由来の曲げ軸へ座標で1対1対応させます。
 
-The package contains an error and is not a successful M-BEND input if any required value
-cannot be resolved. Validation includes:
+- UP → 正の `signedAngleDeg`、`direction=up`、`BEND_UP`
+- DOWN → 負の `signedAngleDeg`、`direction=down`、`BEND_DOWN`
 
-- coordinate frame and fixed-face normal
-- non-zero bend axis and signed angle
-- signed angle, direction, and DXF layer agreement
-- moving-side point not on the bend axis
-- one JSON bend to exactly one DXF line, with matching endpoints
-- at least one fully resolved bend
+可動側点と曲げ後位置から求める軸回り回転は独立した整合性チェックです。不一致時は `BEND_DIRECTION_GEOMETRY_MISMATCH` を警告として記録し、SolidWorks方向を採用します。
 
-No missing v0.3 geometry is filled from a default `up`, guessed angle, or guessed axis.
+## 厳格な失敗条件
 
-## DXF layers
+- 座標系または固定面法線を取得できない
+- 曲げ軸が欠落またはゼロ長
+- SolidWorks曲げ方向を取得・座標照合できない
+- 符号付き角度がゼロ
+- `direction` とDXFレイヤーが不一致
+- `movingSidePoint` が欠落または曲げ軸上
+- JSON曲げとDXF曲げ線が1対1ではない
+- 解決済み曲げが0本
 
-The post-processor registers and emits:
+不足したv0.3必須値は推測で補完しません。
 
-- `CUT`: outline, holes, and other exported geometry
-- `BEND_UP`: bends with `signedAngleDeg > 0`
-- `BEND_DOWN`: bends with `signedAngleDeg < 0`
+## 対応範囲
 
-Every matched bend also records its DXF line endpoints and handle in `bend.json`.
+完成範囲は保存済みの単一板金パーツで、通常の直線曲げ、箱曲げ、Z曲げ、標準的なハット曲げです。ヘミング、専用ジャグ、成形工具、ロフト・曲線曲げ、マルチボディは別フェーズです。
 
-## Build and SolidWorks verification
-
-Run from the repository root:
+## ビルドと確認
 
 ```powershell
 .\scripts\build-macro.ps1
 ```
 
-This creates `macro/BendExportMacro.exe` and copies the two SolidWorks Interop DLLs beside it.
-Keep the EXE, Interop DLLs, and `macro/BendExportMacro.swb` in the same folder.
-In SolidWorks 2022, open each representative saved sheet-metal part and run the SWB from
-**Tools > Macro > Run**. The SWB invokes the schema-v0.3 host and waits for completion.
-The export is accepted
-only when the result dialog has no `[ERROR]` entries and the generated JSON/DXF satisfy the
-checks above. Validate all three representative models before merging to `main`.
+SolidWorks 2022で代表モデルを開き、**ツール → マクロ → 実行** から `macro/BendExportMacro.swb` を実行します。`errors` が空で、曲げ本数・方向・角度・DXFレイヤーがSolidWorksと一致することを確認します。
