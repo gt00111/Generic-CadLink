@@ -5,6 +5,7 @@ obj/
 *.suo
 *.dll
 !lib/.gitkeep
+!macro/BendExportMacro.exe
 *.swp
 
 # Sample models and generated bend.json (local verification only)

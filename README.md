@@ -1,137 +1,85 @@
 # Generic CadLink
 
-SolidWorks 2022 板金パーツから portal（板金製造支援）向けに `bend.json` を出力する自作 CADLink。
+SolidWorks 2022の板金パーツから、板金シミュレーターが再利用できる展開DXFと曲げメタデータを出力するツールです。
 
-## Phase 2（現在）
+## 完成範囲（schema v0.3）
 
-- **成果物**: VBA マクロ — 板金曲げメタデータ + 展開 DXF
-- **実行ファイル**: **`macro/BendExportMacro.swb`**（Late Binding・参照設定不要）
-- **出力先**: `{exportRoot}\{品番}\` 配下の `bend.json` + `flat.dxf`（`macro/cadlink.config.json` で `exportRoot` 指定）
-- **レイヤー規約**: `macro/GenericCadLink.dxfmap`（`CUT` / `BEND_UP` / `BEND_DOWN`）
-- **加工順**: 出力しない（純正 CadLink → M-BEND と同じ分担。portal 側で決定）
+- 保存済みの単一板金パーツを対象
+- `bend.json` と `flat.dxf` を品番別フォルダへ出力
+- 板厚、SolidWorksマテリアル名、内R、角度、曲げ線長さを出力
+- 右手系・mm・XY展開座標を明記
+- 曲げ軸、可動側代表点、符号付き角度を出力
+- SolidWorksフラットパターンのUP/DOWNを正本として使用
+- DXFの `CUT` / `BEND_UP` / `BEND_DOWN` レイヤーを生成
+- JSONの各曲げとDXF曲げ線を座標で1対1対応
+- 通常曲げ、箱曲げ、Z曲げ、標準的なハット曲げを想定
 
-Phase 1（`bend.json` のみ）は **v0.1.0 / develop 初回コミット** で達成済みです。
+特殊曲げ（ヘミング、ジャグ専用フィーチャー、成形工具、ロフト・曲線曲げ、マルチボディ）は完成範囲外です。
 
-> **M-BEND 3D 再現に関する注意**
-> 現行 VBA マクロの schema v0.1 は曲げ本数・R・角度・DXF 出力用の
-> レガシー形式です。`direction` は SolidWorks の方向値に依存するため、
-> これだけで M-BEND が表裏・固定側・可動側を一意に再現することは保証しません。
-> 決定論的な3D再現には schema v0.3 の `fixedFace.normal`,
-> `signedAngleDeg`, `axis`, `movingSidePoint` を使用します。
-> 仕様: [docs/bend-package-schema-v0.3.md](docs/bend-package-schema-v0.3.md)
+## 実行方法
 
-詳細要件: [docs/requirements.md](docs/requirements.md)  
-**マクロの登録・実行手順**: [macro/README.md](macro/README.md)
+1. SolidWorks 2022で保存済みの板金 `.sldprt` を開く
+2. **ツール → マクロ → 実行** を選ぶ
+3. [`macro/BendExportMacro.swb`](macro/BendExportMacro.swb) を実行する
 
-## クイックスタート（SolidWorks）
+`BendExportMacro.swb` は同じフォルダの `BendExportMacro.exe` を起動します。次のファイルを同じフォルダに置いてください。
 
-**日常**（最新 `.swb`）:
+- `BendExportMacro.swb`
+- `BendExportMacro.exe`
+- `SolidWorks.Interop.sldworks.dll`
+- `SolidWorks.Interop.swconst.dll`
 
-1. 板金パーツを開いて **保存**
-2. **ツール → マクロ → 実行** → **`macro/BendExportMacro.swb`**
-3. 同フォルダの **`CadLinkExport\{品番}\`** に `bend.json` と `flat.dxf` が出力される（本番は `cadlink.config.json` で共有フォルダを指定）
+詳細は [`macro/README.md`](macro/README.md) を参照してください。
 
-> 古い `.swp`（参照設定版）を使っている場合は、最新 **`BendExportMacro.swb`** に切り替えてください。  
-> 詳細: [macro/README.md](macro/README.md)
+## 出力
 
-## 前提
+`macro/cadlink.config.json` の `exportRoot` が未設定の場合、部品ファイルと同じフォルダの `CadLinkExport` に出力します。
 
-- SolidWorks **2022**（64bit）
-- .NET Framework **4.8**
-- Visual Studio 2019 以降（ビルド用）
-
-## セットアップ
-
-### 1. SolidWorks API DLL を配置
-
-SolidWorks 2022 インストール先から次を `lib\` にコピーします。
-
-```powershell
-$sw = "C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS"
-Copy-Item "$sw\api\redist\SolidWorks.Interop.sldworks.dll" "lib\"
-Copy-Item "$sw\api\redist\SolidWorks.Interop.swconst.dll" "lib\"
+```text
+CadLinkExport/
+  {partNumber}/
+    bend.json
+    flat.dxf
 ```
 
-パスが異なる場合は環境に合わせて変更してください。
-
-### 2. ビルド
-
-```powershell
-msbuild GenericCadLink.sln /p:Configuration=Release
-```
-
-出力: `src\GenericCadLink.Macro\bin\Release\GenericCadLink.Macro.dll`
-
-## SolidWorks での実行
-
-**→ [macro/README.md](macro/README.md) を参照（推奨・ビルド不要）**
-
-実行するソース: **`macro/BendExportMacro.cs`**（`Main()` メソッドを含む 1 ファイル）
-
-### 方法 A: マクロとして登録（Phase 1 推奨）
-
-1. SolidWorks で **ツール → マクロ → 新規作成** — C#、名前 **BendExportMacro**
-2. `macro/BendExportMacro.cs` の内容をすべて貼り付けて保存
-3. 板金 `.sldprt` を開いて保存後、**ツール → マクロ → 実行**
-
-### 方法 B: Visual Studio で DLL ビルド（Phase 3 以降向け）
-
-1. SW マクロプロジェクトに `GenericCadLink.Macro.dll` への参照を追加
-2. `Main` 内で:
-
-```csharp
-var macro = new GenericCadLink.Macro.BendExportMacro();
-macro.swApp = (SldWorks)SwApp;
-macro.Main();
-```
-
-## 出力例
-
-`ABC-123.sldprt` と同じフォルダに `bend.json`:
+`exportRoot` を共有フォルダへ変更する例：
 
 ```json
 {
-  "schemaVersion": "0.1",
-  "partNumber": "ABC-123",
-  "thickness": 1.6,
-  "material": "SPCC",
-  "bends": [
-    {
-      "id": "B1",
-      "dxfLayer": "BEND_UP",
-      "direction": "up",
-      "innerRadius": 1.0,
-      "angleDeg": 90,
-      "lengthMm": 120,
-      "swFeatureName": "Edge-Flange1"
-    }
-  ],
-  "errors": [],
-  "warnings": []
+  "exportRoot": "\\\\server\\CadLinkExport"
 }
 ```
 
-## 検証
+## 曲げ方向
 
-1. `samples/` に代表 `sldprt` を配置
-2. [samples/EXPECTED_TEMPLATE.md](samples/EXPECTED_TEMPLATE.md) に期待値を記入
-3. マクロ実行後、SW 画面と `bend.json` の山/谷・R・角度を照合
+最終的な `direction`、`signedAngleDeg` の符号、DXFレイヤーはSolidWorksフラットパターンの曲げ線方向から決定します。
 
-## プロジェクト構成
+- UP → `signedAngleDeg > 0` → `BEND_UP`
+- DOWN → `signedAngleDeg < 0` → `BEND_DOWN`
 
-```text
-Generic CadLink/
-  docs/requirements.md
-  samples/
-  src/GenericCadLink.Macro/   … Phase 1 マクロ
-  lib/                        … SW Interop DLL（手動配置）
+可動側の3D幾何から求めた方向は二重チェックに使います。SolidWorks判定と異なる場合は `BEND_DIRECTION_GEOMETRY_MISMATCH` を警告として記録し、SolidWorks判定を採用します。
+
+## 成功条件
+
+- `errors` が空
+- SolidWorksとJSONの曲げ本数が一致
+- SolidWorks曲げ注記とJSON/DXFのUP/DOWNが一致
+- `axis`、`movingSidePoint`、`dxfLine` が各曲げに存在
+- JSON曲げとDXF曲げ線が1対1
+
+## ビルド
+
+```powershell
+.\scripts\build-macro.ps1
 ```
 
-## Phase 状態
+出力先：`macro/BendExportMacro.exe`
 
-| Phase | 内容 | 状態 |
-|---|---|---|
-| 1 | `bend.json` マクロ | ✅ 実用可（v0.1.0） |
-| 2 | `flat.dxf` + レイヤー規約 | ✅ 実用可（v0.2.1・Y248 検証済） |
-| 3 | .NET アドイン（ツールバーボタン） | 未着手 |
-| 4 | portal 自動取込 | 未着手 |
+## 今後の範囲
+
+- .NETアドインUI
+- 共有フォルダ監視と自動取込
+- M-BEND／portalとの連携
+- 特殊曲げのグループ情報と加工工程情報
+
+要件は [`docs/requirements.md`](docs/requirements.md)、v0.3実装詳細は [`docs/schema-v0.3-implementation.md`](docs/schema-v0.3-implementation.md) を参照してください。

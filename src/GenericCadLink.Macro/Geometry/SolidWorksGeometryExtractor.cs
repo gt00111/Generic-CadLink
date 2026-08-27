@@ -1,0 +1,563 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using GenericCadLink.Macro.Models;
+using SolidWorks.Interop.sldworks;
+
+namespace GenericCadLink.Macro.Geometry
+{
+    internal sealed class SolidWorksGeometryExtractor
+    {
+        private readonly ModelDoc2 _model;
+        private readonly MathUtility _math;
+
+        public SolidWorksGeometryExtractor(ModelDoc2 model, SldWorks app)
+        {
+            _model = model;
+            _math = app.GetMathUtility() as MathUtility;
+        }
+
+        public bool TryCreateFixedFrame(IFeature flatPattern, out CoordinateFrame frame, out FixedFaceInfo fixedFace, out Face2 fixedFaceObject, out string error)
+        {
+            frame = null; fixedFace = null; fixedFaceObject = null; error = null;
+            var data = flatPattern?.GetDefinition() as IFlatPatternFeatureData;
+            if (data == null) { error = "FIXED_FACE_DEFINITION_MISSING"; return false; }
+
+            data.AccessSelections(_model, null);
+            try
+            {
+                fixedFaceObject = data.FixedFace2 as Face2;
+                if (fixedFaceObject == null) { error = "FIXED_FACE_MISSING"; return false; }
+                var normal = ReadVector(fixedFaceObject.Normal);
+                normal = VectorMath.Normalize(normal);
+                if (normal == null) { error = "FIXED_FACE_NORMAL_MISSING"; return false; }
+
+                Vector3Info origin;
+                Vector3Info xAxis;
+                if (!TryGetDeterministicFaceAxis(fixedFaceObject, normal, out origin, out xAxis))
+                {
+                    origin = ReadFacePoint(fixedFaceObject);
+                    xAxis = MakePerpendicular(normal);
+                }
+                var yAxis = VectorMath.Normalize(VectorMath.Cross(normal, xAxis));
+                xAxis = VectorMath.Normalize(VectorMath.Cross(yAxis, normal));
+                if (origin == null || xAxis == null || yAxis == null) { error = "FIXED_FACE_FRAME_INVALID"; return false; }
+
+                var fixedFacePoint = ReadFacePoint(fixedFaceObject);
+                if (fixedFacePoint == null) { error = "FIXED_FACE_POINT_MISSING"; return false; }
+                frame = new CoordinateFrame
+                {
+                    OriginModelMeters = origin,
+                    XAxisModel = xAxis,
+                    YAxisModel = yAxis,
+                    NormalModel = normal,
+                    FixedFacePointModel = fixedFacePoint,
+                };
+                fixedFace = new FixedFaceInfo
+                {
+                    Side = "unknown",
+                    Normal = new Vector3Info(0, 0, 1),
+                    Resolved = false,
+                    PersistentId = GetPersistentId(fixedFaceObject),
+                };
+                return true;
+            }
+            finally { data.ReleaseSelectionAccess(); }
+        }
+
+        public FoldedBendGeometry CaptureFoldedGeometry(IFeature feature, Face2 fixedFace, CoordinateFrame frame, AxisInfo axis, double angleDeg)
+        {
+            var result = new FoldedBendGeometry();
+            var faces = GetSolidBodyFaces();
+            if (faces == null || faces.Length == 0) faces = feature.GetFaces() as object[];
+            if (faces == null) { result.Error = "FEATURE_FACES_MISSING"; return result; }
+
+            var candidates = new List<FaceCandidate>();
+            foreach (var item in faces)
+            {
+                var face = item as Face2;
+                if (face == null) continue;
+                var normal = VectorMath.Normalize(ReadVector(face.Normal));
+                if (normal == null) continue;
+                var exportNormal = frame.VectorToExport(normal);
+                if (exportNormal == null || Math.Abs(VectorMath.Dot(exportNormal, axis.Direction)) > 1e-6) continue;
+                var dot = Math.Max(-1.0, Math.Min(1.0, VectorMath.Dot(frame.NormalModel, normal)));
+                var measured = Math.Acos(dot) * 180.0 / Math.PI;
+                var error = Math.Min(Math.Abs(measured - angleDeg), Math.Abs((360.0 - measured) - angleDeg));
+                if (error <= 1.0)
+                    candidates.Add(new FaceCandidate
+                    {
+                        Face = face,
+                        Normal = normal,
+                        Point = ReadFacePoint(face),
+                        Area = face.GetArea(),
+                        TopologyDistance = GetTopologicalDistance(fixedFace, face),
+                        SharesCurvedBendFace = SharesCurvedNeighbor(fixedFace, face),
+                        AxisDistanceMm = VectorMath.DistancePointToLine(frame.PointToExport(ReadFacePoint(face)), axis),
+                    });
+            }
+
+            candidates.RemoveAll(x => x.TopologyDistance < 0);
+            candidates.Sort((a, b) =>
+            {
+                var byAxisDistance = a.AxisDistanceMm.CompareTo(b.AxisDistanceMm);
+                if (Math.Abs(a.AxisDistanceMm - b.AxisDistanceMm) > 0.05) return byAxisDistance;
+                var byCurvedConnection = b.SharesCurvedBendFace.CompareTo(a.SharesCurvedBendFace);
+                if (byCurvedConnection != 0) return byCurvedConnection;
+                var byDistance = a.TopologyDistance.CompareTo(b.TopologyDistance);
+                if (byDistance != 0) return byDistance;
+                var byArea = b.Area.CompareTo(a.Area);
+                if (byArea != 0) return byArea;
+                return string.CompareOrdinal(GetPersistentId(a.Face), GetPersistentId(b.Face));
+            });
+            if (candidates.Count == 0) { result.Error = "MOVING_FACE_NOT_FOUND"; return result; }
+            if (candidates.Count > 1 && Math.Abs(candidates[0].AxisDistanceMm - candidates[1].AxisDistanceMm) <= 0.05 &&
+                candidates[0].SharesCurvedBendFace == candidates[1].SharesCurvedBendFace &&
+                candidates[0].TopologyDistance == candidates[1].TopologyDistance &&
+                Math.Abs(candidates[0].Area - candidates[1].Area) <= 1e-12 &&
+                VectorMath.Dot(candidates[0].Normal, candidates[1].Normal) < 1.0 - 1e-6)
+            {
+                result.Error = "MOVING_FACE_AMBIGUOUS: " + DescribeCandidate(candidates[0]) +
+                    " vs " + DescribeCandidate(candidates[1]);
+                return result;
+            }
+            result.BentFaceNormalModel = candidates[0].Normal;
+            result.MovingFacePointModel = candidates[0].Point;
+            result.MovingFaceId = GetPersistentId(candidates[0].Face);
+            result.StationaryFaceId = GetPersistentId(fixedFace);
+            return result;
+        }
+
+        private object[] GetSolidBodyFaces()
+        {
+            var part = _model as PartDoc;
+            if (part == null) return null;
+            var bodies = part.GetBodies2(0, true) as object[];
+            if (bodies == null) return null;
+            var result = new List<object>();
+            foreach (var bodyObject in bodies)
+            {
+                var body = bodyObject as Body2;
+                if (body == null) continue;
+                var faces = body.GetFaces() as object[];
+                if (faces == null) continue;
+                result.AddRange(faces);
+            }
+            return result.ToArray();
+        }
+
+        private static string DescribeCandidate(FaceCandidate candidate)
+        {
+            return "{normal=" + FormatVector(candidate.Normal) +
+                ", point=" + FormatVector(candidate.Point) +
+                ", distance=" + candidate.TopologyDistance.ToString(CultureInfo.InvariantCulture) +
+                ", area=" + candidate.Area.ToString("0.#########", CultureInfo.InvariantCulture) +
+                ", axisDistanceMm=" + candidate.AxisDistanceMm.ToString("0.######", CultureInfo.InvariantCulture) +
+                ", curved=" + candidate.SharesCurvedBendFace.ToString().ToLowerInvariant() + "}";
+        }
+
+        private static string FormatVector(Vector3Info value)
+        {
+            if (value == null) return "null";
+            return "[" + value.X.ToString("0.######", CultureInfo.InvariantCulture) + "," +
+                value.Y.ToString("0.######", CultureInfo.InvariantCulture) + "," +
+                value.Z.ToString("0.######", CultureInfo.InvariantCulture) + "]";
+        }
+
+        private bool SharesCurvedNeighbor(Face2 first, Face2 second)
+        {
+            var firstNeighbors = GetAdjacentFaces(first);
+            var secondIds = new HashSet<string>();
+            foreach (var face in GetAdjacentFaces(second))
+            {
+                var id = GetPersistentId(face);
+                if (id != null) secondIds.Add(id);
+            }
+
+            foreach (var face in firstNeighbors)
+            {
+                var id = GetPersistentId(face);
+                if (id == null || !secondIds.Contains(id)) continue;
+                try
+                {
+                    var surface = face.GetSurface() as Surface;
+                    if (surface != null && surface.IsCylinder()) return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        private static List<Face2> GetAdjacentFaces(Face2 face)
+        {
+            var result = new List<Face2>();
+            var edges = face.GetEdges() as object[];
+            if (edges == null) return result;
+            foreach (var edgeObject in edges)
+            {
+                var edge = edgeObject as Edge;
+                if (edge == null) continue;
+                var adjacent = edge.GetTwoAdjacentFaces2() as object[];
+                if (adjacent == null) continue;
+                foreach (var faceObject in adjacent)
+                {
+                    var adjacentFace = faceObject as Face2;
+                    if (adjacentFace != null) result.Add(adjacentFace);
+                }
+            }
+            return result;
+        }
+
+        private int GetTopologicalDistance(Face2 start, Face2 target)
+        {
+            var targetId = GetPersistentId(target);
+            if (targetId == null) return -1;
+            var visited = new HashSet<string>();
+            var queue = new Queue<FaceDistance>();
+            queue.Enqueue(new FaceDistance { Face = start, Distance = 0 });
+
+            while (queue.Count > 0 && visited.Count < 10000)
+            {
+                var current = queue.Dequeue();
+                var currentId = GetPersistentId(current.Face);
+                if (currentId == null || !visited.Add(currentId)) continue;
+                if (currentId == targetId) return current.Distance;
+
+                var edges = current.Face.GetEdges() as object[];
+                if (edges == null) continue;
+                foreach (var edgeObject in edges)
+                {
+                    var edge = edgeObject as Edge;
+                    if (edge == null) continue;
+                    var adjacent = edge.GetTwoAdjacentFaces2() as object[];
+                    if (adjacent == null) continue;
+                    foreach (var faceObject in adjacent)
+                    {
+                        var face = faceObject as Face2;
+                        if (face != null)
+                            queue.Enqueue(new FaceDistance { Face = face, Distance = current.Distance + 1 });
+                    }
+                }
+            }
+            return -1;
+        }
+
+        public bool TryReadFlatAxis(IFeature feature, CoordinateFrame frame, out AxisInfo axis, out string error)
+        {
+            axis = null; error = null;
+            var data = feature.GetDefinition() as IOneBendFeatureData;
+            object[] segments = null;
+            if (data != null)
+            {
+                data.AccessSelections(_model, null);
+                try { segments = data.FlatPatternSketchSegments2 as object[]; }
+                finally { data.ReleaseSelectionAccess(); }
+            }
+            if (segments == null) segments = ReadSketchSegments(feature);
+            if (segments == null) { error = "FLAT_BEND_SEGMENTS_MISSING"; return false; }
+
+            SketchLine best = null; double bestLength = 0;
+            foreach (var item in segments)
+            {
+                var line = item as SketchLine;
+                var segment = item as SketchSegment;
+                if (line == null || segment == null) continue;
+                var length = segment.GetLength();
+                if (length > bestLength) { best = line; bestLength = length; }
+            }
+            if (best == null || bestLength <= 0) { error = "FLAT_BEND_AXIS_MISSING"; return false; }
+            var start = frame.PointToExport(ReadSketchPoint(best.GetStartPoint2()));
+            var end = frame.PointToExport(ReadSketchPoint(best.GetEndPoint2()));
+            VectorMath.OrderAxisEndpoints(ref start, ref end);
+            var direction = VectorMath.Normalize(VectorMath.Subtract(end, start));
+            if (direction == null) { error = "BEND_AXIS_DEGENERATE"; return false; }
+            axis = new AxisInfo { Start = start, End = end, Direction = direction };
+            return true;
+        }
+
+        public List<FlatBendLineInfo> ReadFlatPatternBendLines(IFeature flatPattern, CoordinateFrame frame)
+        {
+            var result = new List<FlatBendLineInfo>();
+            CollectFlatPatternBendLines(flatPattern, frame, result);
+            return result;
+        }
+
+        private void CollectFlatPatternBendLines(IFeature feature, CoordinateFrame frame, List<FlatBendLineInfo> result)
+        {
+            if (feature == null) return;
+            var sketch = feature.GetSpecificFeature2() as Sketch;
+            var segments = sketch == null ? null : sketch.GetSketchSegments() as object[];
+            if (segments != null)
+            {
+                foreach (var item in segments)
+                {
+                    var line = item as SketchLine;
+                    var segment = item as SketchSegment;
+                    if (line == null || segment == null) continue;
+                    string bendDirection;
+                    if (!TryReadSegmentBendDirection(segment, out bendDirection)) continue;
+
+                    var startModel = ReadSketchPointInModel(sketch, line.GetStartPoint2());
+                    var endModel = ReadSketchPointInModel(sketch, line.GetEndPoint2());
+                    if (startModel == null || endModel == null) continue;
+                    var start = frame.PointToExport(startModel);
+                    var end = frame.PointToExport(endModel);
+                    VectorMath.OrderAxisEndpoints(ref start, ref end);
+                    var axisDirection = VectorMath.Normalize(VectorMath.Subtract(end, start));
+                    if (axisDirection == null) continue;
+                    var candidate = new FlatBendLineInfo
+                    {
+                        Axis = new AxisInfo { Start = start, End = end, Direction = axisDirection },
+                        Direction = bendDirection,
+                    };
+                    if (!ContainsEquivalentFlatBendLine(result, candidate)) result.Add(candidate);
+                }
+            }
+
+            var child = feature.GetFirstSubFeature() as IFeature;
+            while (child != null)
+            {
+                CollectFlatPatternBendLines(child, frame, result);
+                child = child.GetNextSubFeature() as IFeature;
+            }
+        }
+
+        private static bool TryReadSegmentBendDirection(SketchSegment segment, out string direction)
+        {
+            direction = null;
+
+            int value;
+            try
+            {
+                value = Convert.ToInt32(((object)segment).GetType().InvokeMember(
+                    "GetBendLineDirection",
+                    System.Reflection.BindingFlags.InvokeMethod,
+                    null,
+                    segment,
+                    null), CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            if (value == 1) direction = "up";
+            else if (value == 2) direction = "down";
+            return direction != null;
+        }
+
+        public bool TryMatchFlatBendDirection(AxisInfo axis, IList<FlatBendLineInfo> lines,
+            ISet<int> used, out string direction, out string error)
+        {
+            direction = null; error = null;
+            var best = -1;
+            var bestError = double.MaxValue;
+            for (var i = 0; i < lines.Count; i++)
+            {
+                if (used.Contains(i)) continue;
+                var candidate = lines[i].Axis;
+                var direct = VectorMath.Length(VectorMath.Subtract(axis.Start, candidate.Start)) +
+                    VectorMath.Length(VectorMath.Subtract(axis.End, candidate.End));
+                var reverse = VectorMath.Length(VectorMath.Subtract(axis.Start, candidate.End)) +
+                    VectorMath.Length(VectorMath.Subtract(axis.End, candidate.Start));
+                var matchError = Math.Min(direct, reverse);
+                if (matchError < bestError) { best = i; bestError = matchError; }
+            }
+            if (best < 0 || bestError > 0.1)
+            {
+                error = "FLAT_BEND_DIRECTION_MATCH_FAILED: directionLines=" + lines.Count +
+                    ", distanceMm=" + (best < 0 ? "n/a" : bestError.ToString("0.######", CultureInfo.InvariantCulture));
+                return false;
+            }
+            used.Add(best);
+            direction = lines[best].Direction;
+            return true;
+        }
+
+        private static bool ContainsEquivalentFlatBendLine(IList<FlatBendLineInfo> lines, FlatBendLineInfo candidate)
+        {
+            foreach (var existing in lines)
+            {
+                var direct = VectorMath.Length(VectorMath.Subtract(existing.Axis.Start, candidate.Axis.Start)) +
+                    VectorMath.Length(VectorMath.Subtract(existing.Axis.End, candidate.Axis.End));
+                var reverse = VectorMath.Length(VectorMath.Subtract(existing.Axis.Start, candidate.Axis.End)) +
+                    VectorMath.Length(VectorMath.Subtract(existing.Axis.End, candidate.Axis.Start));
+                if (Math.Min(direct, reverse) <= 0.01 && existing.Direction == candidate.Direction) return true;
+            }
+            return false;
+        }
+
+        private static object[] ReadSketchSegments(IFeature feature)
+        {
+            var sketch = feature.GetSpecificFeature2() as Sketch;
+            if (sketch != null)
+            {
+                var segments = sketch.GetSketchSegments() as object[];
+                if (segments != null && segments.Length > 0) return segments;
+            }
+            var child = feature.GetFirstSubFeature() as IFeature;
+            while (child != null)
+            {
+                sketch = child.GetSpecificFeature2() as Sketch;
+                if (sketch != null)
+                {
+                    var segments = sketch.GetSketchSegments() as object[];
+                    if (segments != null && segments.Length > 0) return segments;
+                }
+                child = child.GetNextSubFeature() as IFeature;
+            }
+            return null;
+        }
+
+        public double ComputeSignedAngleFromMovingSide(AxisInfo axis, CoordinateFrame frame,
+            Vector3Info flatMovingSidePoint, Vector3Info foldedMovingFacePointModel,
+            double angleDeg, out string error)
+        {
+            error = null;
+            if (axis == null || flatMovingSidePoint == null || foldedMovingFacePointModel == null)
+            {
+                error = "SIGNED_ANGLE_POINTS_MISSING";
+                return 0;
+            }
+
+            var midpoint = VectorMath.Scale(VectorMath.Add(axis.Start, axis.End), 0.5);
+            var flatVector = VectorMath.Subtract(flatMovingSidePoint, midpoint);
+            var foldedPoint = frame.PointToExport(foldedMovingFacePointModel);
+            var foldedVector = VectorMath.Subtract(foldedPoint, midpoint);
+
+            // Remove any component along the bend axis. Only the rotation in the
+            // plane perpendicular to the axis determines mountain/valley.
+            flatVector = VectorMath.Subtract(flatVector,
+                VectorMath.Scale(axis.Direction, VectorMath.Dot(flatVector, axis.Direction)));
+            foldedVector = VectorMath.Subtract(foldedVector,
+                VectorMath.Scale(axis.Direction, VectorMath.Dot(foldedVector, axis.Direction)));
+            flatVector = VectorMath.Normalize(flatVector);
+            foldedVector = VectorMath.Normalize(foldedVector);
+            if (flatVector == null || foldedVector == null)
+            {
+                error = "SIGNED_ANGLE_VECTOR_DEGENERATE";
+                return 0;
+            }
+
+            var sine = VectorMath.Dot(axis.Direction, VectorMath.Cross(flatVector, foldedVector));
+            var cosine = Math.Max(-1.0, Math.Min(1.0, VectorMath.Dot(flatVector, foldedVector)));
+            var measuredAngle = Math.Atan2(sine, cosine) * 180.0 / Math.PI;
+            if (!VectorMath.IsFinite(measuredAngle) || Math.Abs(measuredAngle) <= 1e-6)
+            {
+                error = "SIGNED_ANGLE_UNRESOLVED";
+                return 0;
+            }
+
+            return Math.Sign(measuredAngle) * Math.Abs(angleDeg);
+        }
+
+        public bool OrientAxisToMovingSide(AxisInfo axis, Vector3Info movingSidePoint)
+        {
+            if (axis == null || movingSidePoint == null) return false;
+            var midpoint = VectorMath.Scale(VectorMath.Add(axis.Start, axis.End), 0.5);
+            var movingVector = VectorMath.Subtract(movingSidePoint, midpoint);
+            var sideSign = VectorMath.Dot(new Vector3Info(0, 0, 1), VectorMath.Cross(axis.Direction, movingVector));
+            if (!VectorMath.IsFinite(sideSign) || Math.Abs(sideSign) <= VectorMath.GeometryToleranceMm) return false;
+
+            // Canonical convention: when viewed from +flatNormal, the moving side is
+            // always to the right of axisStart -> axisEnd. This makes equal physical
+            // bends on opposite edges carry the same signed angle.
+            if (sideSign > 0)
+            {
+                var swap = axis.Start; axis.Start = axis.End; axis.End = swap;
+                axis.Direction = VectorMath.Scale(axis.Direction, -1);
+            }
+            return true;
+        }
+
+        public Vector3Info CreateMovingSidePoint(AxisInfo axis, CoordinateFrame frame)
+        {
+            var fixedPoint = frame.PointToExport(frame.FixedFacePointModel);
+            var side = new Vector3Info(-axis.Direction.Y, axis.Direction.X, 0);
+            var midpoint = VectorMath.Scale(VectorMath.Add(axis.Start, axis.End), 0.5);
+            var fixedSide = VectorMath.Dot(VectorMath.Subtract(fixedPoint, midpoint), side);
+            if (Math.Abs(fixedSide) <= VectorMath.GeometryToleranceMm) return null;
+            if (fixedSide > 0) side = VectorMath.Scale(side, -1);
+            var candidate = VectorMath.Add(midpoint, VectorMath.Scale(side, Math.Max(1.0, VectorMath.Length(VectorMath.Subtract(axis.End, axis.Start)) * 0.01)));
+            candidate.Z = 0;
+            return candidate;
+        }
+
+        public string GetPersistentId(object entity)
+        {
+            try
+            {
+                var bytes = _model.Extension.GetPersistReference3(entity) as byte[];
+                return bytes == null ? null : Convert.ToBase64String(bytes);
+            }
+            catch { return null; }
+        }
+
+        private static Vector3Info ReadFacePoint(Face2 face)
+        {
+            var uv = face.GetUVBounds() as double[]; var surface = face.GetSurface() as Surface;
+            if (uv == null || uv.Length < 4 || surface == null) return null;
+            var eval = surface.Evaluate((uv[0] + uv[1]) * 0.5, (uv[2] + uv[3]) * 0.5, 0, 0) as double[];
+            return eval == null || eval.Length < 3 ? null : new Vector3Info(eval[0], eval[1], eval[2]);
+        }
+
+        private static bool TryGetDeterministicFaceAxis(Face2 face, Vector3Info normal, out Vector3Info origin, out Vector3Info xAxis)
+        {
+            origin = null; xAxis = null; double longest = 0;
+            var edges = face.GetEdges() as object[]; if (edges == null) return false;
+            foreach (var item in edges)
+            {
+                var edge = item as Edge; if (edge == null) continue;
+                var startVertex = edge.GetStartVertex() as Vertex; var endVertex = edge.GetEndVertex() as Vertex;
+                if (startVertex == null || endVertex == null) continue;
+                var start = ReadVector(startVertex.GetPoint()); var end = ReadVector(endVertex.GetPoint());
+                var vector = VectorMath.Subtract(end, start);
+                vector = VectorMath.Subtract(vector, VectorMath.Scale(normal, VectorMath.Dot(vector, normal)));
+                var length = VectorMath.Length(vector); if (length <= longest) continue;
+                longest = length; origin = start; xAxis = VectorMath.Normalize(vector);
+            }
+            return origin != null && xAxis != null;
+        }
+
+        private static Vector3Info MakePerpendicular(Vector3Info normal)
+        {
+            var seed = Math.Abs(normal.X) < 0.9 ? new Vector3Info(1, 0, 0) : new Vector3Info(0, 1, 0);
+            return VectorMath.Normalize(VectorMath.Cross(seed, normal));
+        }
+        private static Vector3Info ReadSketchPoint(object pointObject) { var p = pointObject as SketchPoint; return p == null ? null : new Vector3Info(p.X, p.Y, p.Z); }
+        private Vector3Info ReadSketchPointInModel(Sketch sketch, object pointObject)
+        {
+            var point = ReadSketchPoint(pointObject);
+            if (point == null || sketch == null || _math == null) return point;
+            try
+            {
+                var modelToSketch = sketch.ModelToSketchTransform;
+                var sketchToModel = modelToSketch == null ? null : modelToSketch.IInverse();
+                var mathPoint = _math.CreatePoint(new[] { point.X, point.Y, point.Z }) as MathPoint;
+                var transformed = mathPoint == null || sketchToModel == null ? null :
+                    mathPoint.MultiplyTransform(sketchToModel) as MathPoint;
+                return transformed == null ? point : ReadVector(transformed.ArrayData);
+            }
+            catch { return point; }
+        }
+        private static Vector3Info ReadVector(object value) { var p = value as double[]; return p == null || p.Length < 3 ? null : new Vector3Info(p[0], p[1], p[2]); }
+
+        private sealed class FaceCandidate { public Face2 Face; public Vector3Info Normal; public Vector3Info Point; public double Area; public double AxisDistanceMm; public int TopologyDistance; public bool SharesCurvedBendFace; }
+        private sealed class FaceDistance { public Face2 Face; public int Distance; }
+    }
+
+    internal sealed class FoldedBendGeometry
+    {
+        public Vector3Info BentFaceNormalModel { get; set; }
+        public Vector3Info MovingFacePointModel { get; set; }
+        public string StationaryFaceId { get; set; }
+        public string MovingFaceId { get; set; }
+        public string Error { get; set; }
+    }
+
+    internal sealed class FlatBendLineInfo
+    {
+        public AxisInfo Axis { get; set; }
+        public string Direction { get; set; }
+    }
+}
